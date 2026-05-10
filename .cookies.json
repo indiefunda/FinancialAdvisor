@@ -1,0 +1,52 @@
+[
+  {
+    "name": "csrftoken",
+    "value": "g7zsEmnYuS78nqrP0xMKGeRjzznyI0wM",
+    "domain": "discountingcashflows.com",
+    "path": "/",
+    "expires": 1809879606.821752,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "cc_cookie",
+    "value": "%7B%22categories%22%3A%5B%22necessary%22%2C%22analytics%22%2C%22advertisement%22%2C%22functionality%22%2C%22security%22%5D%2C%22revision%22%3A0%2C%22data%22%3Anull%2C%22consentTimestamp%22%3A%222026-05-09T14%3A00%3A16.273Z%22%2C%22consentId%22%3A%223c9b6493-a689-434d-988b-67490e0cbdff%22%2C%22services%22%3A%7B%22necessary%22%3A%5B%5D%2C%22analytics%22%3A%5B%22analytics_storage%22%5D%2C%22advertisement%22%3A%5B%22ad_storage%22%2C%22ad_user_data%22%2C%22ad_personalization%22%5D%2C%22functionality%22%3A%5B%22functionality_storage%22%2C%22personalization_storage%22%5D%2C%22security%22%3A%5B%22security_storage%22%5D%7D%2C%22languageCode%22%3A%22en%22%2C%22lastConsentTimestamp%22%3A%222026-05-09T14%3A00%3A16.273Z%22%2C%22expirationTime%22%3A1794060016273%7D",
+    "domain": ".discountingcashflows.com",
+    "path": "/",
+    "expires": 1794060016,
+    "httpOnly": false,
+    "secure": true,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_ga",
+    "value": "GA1.1.1322637635.1778335212",
+    "domain": ".discountingcashflows.com",
+    "path": "/",
+    "expires": 1812895216.277285,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "aws-waf-token",
+    "value": "6109466b-5c3c-4954-b09b-24e459dc57e9:CQoAl05xsCAxAAAA:CS1dlWlvNIM91nSoZUVJgRFdr21xdDJTJuIB4JKPEWBiOIgdl/tFJscTWzfWqf+mdWJWwE/608Gl8QSzQpZ9AbAHJxobKcssnvFmCW0Fm1pQU9pEr0Z5lbfhhAi04xt3OgwNiwSr600iGj9BSH8hwSvKJ6iO1vkacFkXcdyYjPv6TXq8faCzbL4x55NWNUZc0ctKhEmb1FiuEifL+TgHzqO1euJdrHaNeNRR3XsvyjOy0IF87xXiS6t6gB2NN5tzB9N3e1Q6UnZMbQ==",
+    "domain": ".discountingcashflows.com",
+    "path": "/",
+    "expires": 1778775605,
+    "httpOnly": false,
+    "secure": true,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_ga_87V5R4G6NZ",
+    "value": "GS2.1.s1778430007$o3$g0$t1778430007$j60$l0$h0",
+    "domain": ".discountingcashflows.com",
+    "path": "/",
+    "expires": 1812990007.882997,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  }
+]
