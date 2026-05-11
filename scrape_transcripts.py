@@ -3,8 +3,9 @@ Scrape earnings call transcripts from discountingcashflows.com.
 
 Usage:
     python scrape_transcripts.py WDH
-    python scrape_transcripts.py HUIZ
+    python scrape_transcripts.py HUIZ 2
 
+Optional second argument: number of recent years to fetch (default: all).
 Saves cookies to .cookies.json so you only solve CAPTCHA once.
 """
 
@@ -39,7 +40,7 @@ def load_cookies(context):
     return False
 
 
-def scrape_transcripts(ticker):
+def scrape_transcripts(ticker, num_years=30):
     ticker = ticker.upper()
     transcripts_dir = DATA_ROOT / ticker / "EarningsTranscripts"
     transcripts_dir.mkdir(parents=True, exist_ok=True)
@@ -112,6 +113,13 @@ def scrape_transcripts(ticker):
             available = links
 
         log(">> Found " + str(len(available)) + " quarter(s)")
+
+        # ── Filter by number of recent years ───────────────────────
+        from datetime import date
+        current_year = date.today().year
+        cutoff_year = current_year - num_years + 1
+        available = [q for q in available if int(q["year"]) >= cutoff_year]
+        log(">> Keeping " + str(len(available)) + " quarter(s) (last " + str(num_years) + " year(s))")
 
         downloaded = 0
         errors = 0
@@ -204,8 +212,9 @@ def scrape_transcripts(ticker):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python scrape_transcripts.py <TICKER>")
-        print("Example: python scrape_transcripts.py HUIZ")
+        print("Usage: python scrape_transcripts.py <TICKER> [NUM_YEARS]")
+        print("Example: python scrape_transcripts.py HUIZ 2")
         sys.exit(1)
 
-    scrape_transcripts(sys.argv[1])
+    num_years = int(sys.argv[2]) if len(sys.argv) >= 3 else 30
+    scrape_transcripts(sys.argv[1], num_years)

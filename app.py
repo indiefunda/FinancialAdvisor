@@ -76,6 +76,18 @@ if custom_forms:
 
 ticker = st.text_input("Enter Stock Ticker (e.g., YB, AAPL):", "").upper()
 
+col1, col2 = st.columns([1, 3])
+with col1:
+    num_years = st.number_input(
+        "Years of history:",
+        min_value=1,
+        max_value=30,
+        value=2,
+        help="Number of recent years to include (e.g., 2 = current year + last year). Applies to both SEC filings and transcripts."
+    )
+with col2:
+    st.caption("")  # spacer
+
 download_btn = st.button("Download & Convert to Markdown", type="primary", use_container_width=True)
 
 if download_btn and ticker:
@@ -206,6 +218,18 @@ if download_btn and ticker:
                 filtered.append(c)
             filtered.sort(key=lambda c: c[1])
 
+            # ── Year-based filtering ───────────────────────────────────
+            from datetime import date
+            current_year = date.today().year
+            cutoff_year = current_year - num_years + 1  # e.g., 2 years → 2025..2026
+            def get_year_from_candidate(c):
+                st_, fd, dt, p, doc = c
+                # Use period year for annual/quarterly, else filing_date year
+                if p and len(p) == 8:
+                    return int(p[:4])
+                return int(fd[:4])
+            filtered = [c for c in filtered if get_year_from_candidate(c) >= cutoff_year]
+
             # Convert to markdown
             converted = 0
             skipped = 0
@@ -273,7 +297,7 @@ if transcripts_btn and transcripts_ticker:
     with st.status("Running scraper via your browser...", expanded=True) as status:
         try:
             result = subprocess.run(
-                [python_exe, str(script_path), transcripts_ticker],
+                [python_exe, str(script_path), transcripts_ticker, str(num_years)],
                 capture_output=True, text=True, timeout=300
             )
             status.update(label="Complete", state="complete")

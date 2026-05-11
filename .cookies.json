@@ -4,7 +4,7 @@
     "value": "g7zsEmnYuS78nqrP0xMKGeRjzznyI0wM",
     "domain": "discountingcashflows.com",
     "path": "/",
-    "expires": 1809879606.821752,
+    "expires": 1809980595.888699,
     "httpOnly": false,
     "secure": false,
     "sameSite": "Lax"
@@ -31,20 +31,20 @@
   },
   {
     "name": "aws-waf-token",
-    "value": "6109466b-5c3c-4954-b09b-24e459dc57e9:CQoAl05xsCAxAAAA:CS1dlWlvNIM91nSoZUVJgRFdr21xdDJTJuIB4JKPEWBiOIgdl/tFJscTWzfWqf+mdWJWwE/608Gl8QSzQpZ9AbAHJxobKcssnvFmCW0Fm1pQU9pEr0Z5lbfhhAi04xt3OgwNiwSr600iGj9BSH8hwSvKJ6iO1vkacFkXcdyYjPv6TXq8faCzbL4x55NWNUZc0ctKhEmb1FiuEifL+TgHzqO1euJdrHaNeNRR3XsvyjOy0IF87xXiS6t6gB2NN5tzB9N3e1Q6UnZMbQ==",
+    "value": "17d8e058-aa68-4028-8f47-f5da5c185bbb:CQoAlDmO+EoFAAAA:V+FWREKIu2sddwYgD890YEPsFNeowgFbK0OAXnRy8OgXwGHDcYYMTXJFQVm9WaSjB3egpEDN56y2Ven5h9zDhC+oXoMT2dNAgGHH90hW4cFZh9AZTTHBg08b9Z6/OCmtxAXWT5mjANyATef1XqjIQTCK8zPxzt+3hquK6CJrDYXWOdfKoHHivRSVLZV3RYj9k325S5y05YIUTpUWEWdyTsu59NW1xAa5PLsol9/IgnuCRmc4cgV6Gpt1NS39COHzJgxrvXE1KgpTYQ==",
     "domain": ".discountingcashflows.com",
     "path": "/",
-    "expires": 1778775605,
+    "expires": 1778876529,
     "httpOnly": false,
     "secure": true,
     "sameSite": "Lax"
   },
   {
     "name": "_ga_87V5R4G6NZ",
-    "value": "GS2.1.s1778430007$o3$g0$t1778430007$j60$l0$h0",
+    "value": "GS2.1.s1778530931$o4$g1$t1778530996$j60$l0$h0",
     "domain": ".discountingcashflows.com",
     "path": "/",
-    "expires": 1812990007.882997,
+    "expires": 1813090996.164151,
     "httpOnly": false,
     "secure": false,
     "sameSite": "Lax"
