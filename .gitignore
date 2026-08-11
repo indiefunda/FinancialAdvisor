@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+*.egg
+
+# Environment
+.env
+.venv/
+venv/
+
+# Transcript cookies (auto-generated, contains session data)
+.cookies.json
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Project-specific
+build/
+*.spec
+
+# Downloaded SEC data (regenerable, large)
+HUIZ/
+JFIN/
+LU/
+UPST/
+YB/
