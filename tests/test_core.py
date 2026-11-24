@@ -15,6 +15,7 @@ from ai_analyst import (
     build_dossier_context,
     call_deepseek,
     call_deepseek_full,
+    discover_peer_tickers,
     estimate_cost_usd,
     extract_valuation_summary,
     list_dossier_files,
@@ -682,60 +683,61 @@ def test_call_deepseek_handles_non_json_and_missing_key():
 
 
 def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
-    # 1. Default valuation_protocol.md (v2) loads cleanly with all core guardrails + Executive Return Summary
+    # 1. Default valuation_protocol.md (v3) loads cleanly with Universal USD & zero personal hurdle/sizing rules
     proto = load_valuation_protocol()
-    assert "Executive Return Summary" in proto
-    assert "Total % Return" in proto
-    assert "Anchor Precedence Rule" in proto
-    assert ">20% Deviation Rule" in proto
-    assert "Diluted Share Base Rule" in proto
-    assert "All 9 cells" in proto
-    assert "NO CAPM, NO BETA, NO WACC" in proto
-    assert "Share-Class & ADS Ratio Normalization" in proto
+    assert "Universal USD currency policy" in proto
+    assert "Executive Return Summary — Output First" in proto
+    assert "Do not introduce personal investment objectives" in proto
+    assert "No personal hurdle, portfolio constraints" in proto
+    assert "1.1 Share-class and ADS normalization" in proto
     assert "RONIC" in proto
-    assert "Phase 6: Mandatory Self-Audit" in proto
-    assert "Quarter-Kelly" in proto
+    assert "Phase 6: Mandatory Mathematical & Consistency Audit" in proto
+    assert "17. Executive Summary, Phase 3, Phase 4, Phase 5 and `valuation-summary-json` reconcile exactly" in proto
 
     assert "NEVER use CAPM, Beta, or WACC" in SYSTEM_PROMPT_VALUATION_CHAT
     assert "valuation-summary-json" not in SYSTEM_PROMPT_VALUATION_CHAT
 
+    # Trailing JSON summary (v3 placement after Phase 6) parses & strips cleanly
     sample_md = (
-        '<!-- valuation-summary-json {"currency":"USD","current_price":3.67,"target_year":2031,'
-        '"expected_price":9.41,"expected_total_return_pct":156.4,"expected_irr_pct":20.9,'
-        '"base_price":9.22,"base_total_return_pct":151.2,"bear_total_return_pct":8.3,'
-        '"bull_total_return_pct":399.1,"catastrophe_total_return_pct":-29.0,'
-        '"max_weight_pct":8.6,"verdict":"CLEARS"} -->\n\n# Executive Return Summary\nBody'
+        "# Executive Return Summary\nBody text.\n\n"
+        '<!-- valuation-summary-json {"valuation_date":"2026-11-24","ticker":"YB","current_price_usd":10.61,'
+        '"target_year":2031,"base_price_usd":48.54,"bear_price_usd":25.81,"bull_price_usd":86.60,'
+        '"expected_moic":5.44,"expected_total_return_pct":443.8,"expected_irr_pct":45.8,'
+        '"base_moic":5.53,"base_total_return_pct":452.6,"bear_total_return_pct":208.8,'
+        '"bull_total_return_pct":837.0,"prob_capital_loss_pct":5.0,"fifth_percentile_outcome":"Catastrophe",'
+        '"asymmetry_ratio":214.9} -->\n'
     )
     parsed = extract_valuation_summary(sample_md)
     assert parsed is not None
     assert parsed["target_year"] == 2031
-    assert parsed["expected_total_return_pct"] == 156.4
+    assert parsed["expected_moic"] == 5.44
+    assert parsed["expected_total_return_pct"] == 443.8
     stripped = strip_valuation_summary_tag(sample_md)
-    assert stripped.startswith("# Executive Return Summary")
+    assert stripped == "# Executive Return Summary\nBody text."
     assert "valuation-summary-json" not in stripped
 
-    # Partial JSON must be rejected so UI never renders bogus +0.0% / $10,000 KPI cards!
-    assert extract_valuation_summary('<!-- valuation-summary-json {"currency":"USD"} -->') is None
-    assert extract_valuation_summary('<!-- valuation-summary-json {"current_price":0,"expected_total_return_pct":10,"expected_irr_pct":5,"max_weight_pct":5,"verdict":"CLEARS"} -->') is None
+    # Partial JSON must be rejected so UI never renders bogus zeroed KPI cards!
+    assert extract_valuation_summary('<!-- valuation-summary-json {"ticker":"YB"} -->') is None
+    assert extract_valuation_summary('<!-- valuation-summary-json {"current_price_usd":0,"base_price_usd":10,"expected_moic":1.5,"expected_irr_pct":8,"prob_capital_loss_pct":10} -->') is None
 
     # 2. User can save edits to a custom protocol file (and empty text is rejected)
     custom_path = tmp_path / "valuation_protocol.md"
-    save_valuation_protocol("# My Updated Protocol\nHurdle: 18%\n", path=custom_path)
-    assert "Hurdle: 18%" in load_valuation_protocol(path=custom_path)
+    save_valuation_protocol("# My Updated USD Protocol\nCheck footnotes.\n", path=custom_path)
+    assert "Check footnotes." in load_valuation_protocol(path=custom_path)
     with pytest.raises(ValueError, match="empty"):
         save_valuation_protocol("   ", path=custom_path)
 
-    # 3. ValuationParameters + scientific_valuation workflow passes CAPM-free system prompt, max_tokens=65536, temp=0.0
+    # 3. ValuationParameters + scientific_valuation workflow passes CAPM/hurdle-free system prompt, max_tokens=65536, temp=0.0
     t_dir = tmp_path / "HUIZ"
     t_dir.mkdir(parents=True)
     (t_dir / "CompanyBrief.md").write_text("# HUIZ Brief\nTTM Revenue (CNY): CNY 1.34B\n", encoding="utf-8")
     files = list_dossier_files("HUIZ", data_root=tmp_path)
 
     params = ValuationParameters(
-        hurdle_rate_pct=18.0,
-        home_currency="EUR",
         spot_price="USD 4.50 [Market Data: Yahoo, 2026-11-24]",
-        spot_fx_rate="0.92 EUR/USD [Market Data: ECB, 2026-11-24]",
+        spot_fx_rate="0.15005 USD/CNY [Market Data: ECB, 2026-11-24]",
+        dividend_withholding_tax_pct=10.0,
+        adr_custody_fee="0.02",
         activate_cross_border_module=True,
         custom_notes="Use GAAP SBC basis.",
     )
@@ -747,7 +749,7 @@ def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
             "finish_reason": "stop",
             "message": {
                 "reasoning_content": "Checking ADS ratio and Sales-to-Capital...",
-                "content": "## Phase 1\nClean baseline...\n## Phase 6\nAll PASS.",
+                "content": "## Phase 1\nClean baseline...\n## Phase 6\nAll 17 PASS.",
             },
         }],
         "usage": {"prompt_tokens": 2500, "completion_tokens": 1200, "prompt_cache_hit_tokens": 0},
@@ -772,13 +774,16 @@ def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
     sent_payload = mock_session.post.call_args.kwargs["json"]
     assert sent_payload["max_tokens"] == 65536
     assert sent_payload["temperature"] == 0.0
-    assert "NEVER use CAPM, Beta, or WACC" in sent_payload["messages"][0]["content"]
+    sys_msg = sent_payload["messages"][0]["content"]
+    assert "NEVER use CAPM, Beta, WACC" in sys_msg
+    assert "NEVER include personal hurdle rates" in sys_msg
     user_msg = sent_payload["messages"][1]["content"]
-    assert "18.00% nominal annual IRR" in user_msg
-    assert "`EUR`" in user_msg
-    assert "ACTIVE — include the full Cross-Border" in user_msg
+    assert "Universal USD Policy" in user_msg
+    assert "10.00%" in user_msg
+    assert "0.02" in user_msg
+    assert "ACTIVE — include the full Optional Module" in user_msg
     assert "Use GAAP SBC basis." in user_msg
-    assert "My Updated Protocol" in user_msg
+    assert "My Updated USD Protocol" in user_msg
 
 
 def test_deepseek_never_returns_thoughts_as_final_answer_and_streams_cleanly():
@@ -843,7 +848,7 @@ def test_generate_valuation_pack_and_spot_fx(tmp_path: Path):
     mock_t.annual_income_statement.return_value = _FakeStatement(_FakeDF([
         {"Breakdown": "Total Revenue", "2025-12-31": 1_200_000_000, "2024-12-31": 1_050_000_000},
     ]))
-    # Ordinary Shares = 10B vs 100M ADS => 100:1 ADS ratio warning MUST trigger!
+    # Ordinary Shares = 10B vs 100M ADS => 100.00x ADS ratio warning MUST trigger!
     mock_t.quarterly_balance_sheet.return_value = _FakeStatement(_FakeDF([
         {"Breakdown": "Cash And Cash Equivalents", "2026-09-30": 400_000_000},
         {"Breakdown": "Stockholders Equity", "2026-09-30": 750_000_000},
@@ -865,14 +870,15 @@ def test_generate_valuation_pack_and_spot_fx(tmp_path: Path):
     id_rate, _, _ = fetch_spot_fx_rate("USD", "USD")
     assert id_rate == 1.0
 
-    vp = generate_valuation_pack("HUIZ", home_currency="USD", data_root=tmp_path, ticker_obj=mock_t, fx_session=fx_session)
+    vp = generate_valuation_pack("HUIZ", data_root=tmp_path, ticker_obj=mock_t, fx_session=fx_session)
     assert vp.latest_price == 3.50
     assert vp.fx_rate == 0.1385
     vp_text = vp.path.read_text(encoding="utf-8")
     assert "`[Market Data: DefeatBeta, 2026-11-23]`" in vp_text
     assert "`[Market Data: ECB/Frankfurter, 2026-11-23]`" in vp_text
-    assert "| Implied Shares Outstanding (Tradable / ADS Basis) | 100.00M |" in vp_text
-    assert "already in USD (home currency) — do NOT convert them." in vp_text
+    assert "| Implied Shares Outstanding (Market Cap / Price) | 100.00M |" in vp_text
+    assert "Universal USD Constant-FX Rule" in vp_text
+    assert "already in USD — do NOT convert them." in vp_text
     assert "`× 0.138500`" in vp_text
     assert "ADS / Share-Class Ratio Alert" in vp_text
     assert "100.00x" in vp_text
@@ -890,5 +896,89 @@ def test_generate_valuation_pack_and_spot_fx(tmp_path: Path):
     # ValuationPack.md must be Priority #1 in list_dossier_files
     dossier = list_dossier_files("HUIZ", data_root=tmp_path)
     assert dossier[0].rel_label == "ValuationPack.md"
+
+
+def test_ai_peer_discovery_and_named_peers_report(tmp_path: Path):
+    # 1. AI peer discovery parses JSON array, excludes self ("YB"), sanitizes & dedupes
+    ds_session = MagicMock()
+    ds_resp = MagicMock(status_code=200)
+    ds_resp.json.return_value = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"content": '```json\n["YB", "WDH", "HUIZ", "LMND", "wdh"]\n```'},
+        }],
+        "usage": {"prompt_tokens": 120, "completion_tokens": 20},
+    }
+    ds_session.post.return_value = ds_resp
+
+    peers = discover_peer_tickers(
+        ticker="YB",
+        api_key="sk-test",
+        company_name="Yuanbao Inc.",
+        business_summary="Online insurance brokerage in China",
+        session=ds_session,
+    )
+    assert peers == ["WDH", "HUIZ", "LMND"]
+    assert ds_session.post.call_args.kwargs["json"]["max_tokens"] == 2048
+    assert ds_session.post.call_args.kwargs["json"]["temperature"] == 0.0
+
+    # 2. Named Peers report fetches live GAAP multiples + computes positive EV/NOPAT median cleanly
+    class _FakeStmt:
+        def __init__(self, df):
+            self._df = df
+
+        def df(self):
+            return self._df
+
+    def _make_peer(sym, name, ccy, mcap, ev, pe, pb, ps, roe, roic, ebit, pretax, tax):
+        p = _make_mock_ticker(currency=ccy)
+        p.ticker = sym
+        p.info.return_value = _FakeDF([{"short_name": name, "industry": "Insurance Brokers"}])
+        p.market_capitalization.return_value = _FakeDF([{"report_date": "2026-11-20", "market_capitalization": mcap}])
+        p.enterprise_value.return_value = _FakeDF([{"report_date": "2026-11-20", "enterprise_value": ev}])
+        p.price.return_value = _FakeDF([{"report_date": "2026-11-20", "close": 2.00}])
+        p.ttm_pe.return_value = _FakeDF([{"report_date": "2026-11-20", "ttm_pe": pe}] if pe is not None else [])
+        p.pb_ratio.return_value = _FakeDF([{"report_date": "2026-11-20", "pb_ratio": pb}] if pb is not None else [])
+        p.ps_ratio.return_value = _FakeDF([{"report_date": "2026-11-20", "ps_ratio": ps}] if ps is not None else [])
+        p.roe.return_value = _FakeDF([{"report_date": "2026-06-30", "roe": roe}] if roe is not None else [])
+        p.roic.return_value = _FakeDF([{"report_date": "2026-06-30", "roic": roic}] if roic is not None else [])
+        p.quarterly_income_statement.return_value = _FakeStmt(_FakeDF([
+            {"Breakdown": "Operating Income", "TTM": ebit},
+            {"Breakdown": "Pretax Income", "TTM": pretax},
+            {"Breakdown": "Tax Provision", "TTM": tax},
+        ]))
+        return p
+
+    # WDH: EV=300M USD, EBIT=500M CNY * (1 - 20%) * 0.15 = 60M USD NOPAT => EV/NOPAT = 5.00x
+    # HUIZ: EV=-10M USD => neg EV (excluded from EV/NOPAT median)
+    # LMND: EV=1.5B USD, EBIT=-200M USD => neg NOPAT (excluded from EV/NOPAT median)
+    peer_map = {
+        "WDH": _make_peer("WDH", "Waterdrop Inc.", "CNY", 500_000_000, 300_000_000, 8.0, 0.90, 1.10, 0.11, 0.10, 500_000_000, 500_000_000, 100_000_000),
+        "HUIZ": _make_peer("HUIZ", "Huize Holding", "CNY", 25_000_000, -10_000_000, 6.0, 0.50, 0.20, 0.08, 0.07, 40_000_000, 40_000_000, 6_000_000),
+        "LMND": _make_peer("LMND", "Lemonade Inc.", "USD", 2_000_000_000, 1_500_000_000, None, 3.20, 3.80, -0.25, -0.15, -200_000_000, -200_000_000, 0),
+    }
+
+    fx_session = MagicMock()
+    fx_resp = MagicMock(status_code=200)
+    fx_resp.json.return_value = {"date": "2026-11-24", "rates": {"USD": 0.15}}
+    fx_session.get.return_value = fx_resp
+
+    target_mock = _make_mock_ticker(currency="CNY")
+    peers_path = generate_peers_report(
+        "YB",
+        data_root=tmp_path,
+        ticker_obj=target_mock,
+        peer_tickers=["WDH", "HUIZ", "LMND"],
+        peer_ticker_factory=lambda s: peer_map[s],
+        fx_session=fx_session,
+    )
+    txt = peers_path.read_text(encoding="utf-8")
+    assert "## Anchor 1 — Named Global Peer Group" in txt
+    assert "| `WDH` | Waterdrop Inc. | `2026-11-20` | USD 500.00M | USD 300.00M | 5.00x | 8.00x | 0.90x | 1.10x | 11.00% | 10.00% |" in txt
+    assert "| `HUIZ` | Huize Holding | `2026-11-20` | USD 25.00M | USD -10.00M | neg EV |" in txt
+    assert "| `LMND` | Lemonade Inc. | `2026-11-20` | USD 2.00B | USD 1.50B | neg NOPAT |" in txt
+    # Median EV/NOPAT uses only WDH (5.00x); median P/E uses WDH & HUIZ (7.00x); median P/B uses 0.50, 0.90, 3.20 (0.90x)
+    assert "| **Peer Median** | *(positive multiples)* | — | — | — | **5.00x** | **7.00x** | **0.90x** | **1.10x** |" in txt
+
 
 

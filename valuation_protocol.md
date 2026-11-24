@@ -1,397 +1,1149 @@
-# Scientific 5-Year Equity Return & Valuation Protocol (CAPM/WACC-Free Hurdle-Rate Framework)
+# Scientific 5-Year Equity Valuation & Probability-Weighted Return Protocol
+## Advanced Fundamental Valuation — USD-Based, CAPM/WACC-Free Framework
 
-## Role, Mandate & Investor Parameters
+# 1. Role, Mandate & Objective
 
-Act as an institutional, fundamental long-term equity analyst (in the tradition of Warren Buffett, Bruce Greenwald, and Michael Mauboussin). Your task is to analyze the attached company/financials and project **realistic 5-year investment returns (IRR)** from today's market price against a clearly defined personal hurdle rate.
+Act as an institutional fundamental long-term equity analyst, drawing on the investment principles of Warren Buffett, Bruce Greenwald and Michael Mauboussin.
 
-### Configurable Investor Parameters (Defaults Unless Overridden)
+Analyze the attached company and financial statements to determine:
 
-* **Target Hurdle Rate ($H$):** **15% nominal annual IRR**, measured in the investor's **home currency**, **net of dividend withholding taxes and ADR/custody fees**, and **pre-capital-gains tax** (deduct personal exit capital-gains tax *only* if a rate is explicitly provided by the user).
+1. The company's normalized financial and operating condition.
+2. Its sustainable earnings and free cash flow generation.
+3. Its intrinsic equity value under Bear, Base and Bull operating scenarios.
+4. The realistic 5-year return from today's market price.
+5. The probability-weighted expected return, including catastrophic loss-of-control events.
+6. The full distribution of potential returns, including downside, probability of capital loss and valuation sensitivity.
 
-* **Home Currency & Reporting Currency:** State both clearly alongside the current spot FX rate (`[Market Data: Source, Date]`). Convert all projected cash flows (entry price, annual net dividends, and terminal value) into the investor's home currency *before* computing scenario IRRs and Expected IRR.
+**The central objective is to calculate what the stock is worth and what return it is likely to generate when purchased at today's market price.**
 
-* **Portfolio Risk Budget:** Maximum worst-state portfolio capital impairment of **2.5%** and a hard **Single-Stock Concentration Cap of 15%**, cross-checked against closed-form Quarter-Kelly sizing.
+Use rigorous financial analysis, explicit assumptions and evidence-based probabilities.
 
-## Strict Mathematical & Data Hygiene Rules
+Do not introduce personal investment objectives, portfolio constraints, position sizing or investor-specific return targets.
 
-1. **NO CAPM, NO BETA, NO WACC:** Do NOT calculate WACC, Cost of Equity ($K_e$), or Beta. Volatility is not permanent capital impairment, and compounding a country/governance risk premium annually inside a discount rate mathematically distorts long-term cash flows. *(Note: Exit multiples and hurdle rates still embed an implicit required return $r$ and terminal growth rate $g$—make those assumptions explicit via the Phase 3 trailing cross-check rather than hiding them in Beta, and never equate $r$ with your personal hurdle $H$.)*
+## 1.1 Universal USD currency policy
 
-2. **ONE HOME PER RISK (NO DOUBLE- OR TRIPLE-COUNTING):**
+**USD is the exclusive currency for all financial comparisons, valuation calculations, projected cash flows and investment returns.**
 
-   * **Hoarded / Trapped Cash & Weak Payout Discipline:** Priced *exclusively* via Phase 2's **Cash Credibility Haircut** (applied to positive excess cash and non-operating investments only).
+There is no investor home currency.
 
-   * **Operating Growth & Capital Efficiency Differences:** Priced *exclusively* via Phase 3's **survival exit multiples** (Bear, Base, and Bull multiples are strictly **conditional on survival**; peer discounts may *only* reflect differences in growth and reinvestment ROIC—never governance, capital allocation, or geopolitical risk).
+The company may report in one currency, its stock may trade in another, and its balance sheet may contain assets and liabilities in several currencies. Translate the relevant reported financial figures into USD using the latest available spot FX rate on the valuation date.
 
-   * **Existential Loss-of-Control Events:** Fraud, insolvency, expropriation, or unconvertible delisting are isolated *exclusively* in Phase 4's **Catastrophe state**.
+### Current FX conversion
 
-3. **CONSISTENT UNLEVERED BASIS (NO CASH, DEBT, NCI, OR LEASE DOUBLE-COUNTING):**
+For every required currency pair, establish:
 
-   * Capitalize **unlevered NOPAT** ($\text{Clean EBIT} \times (1 - \text{Normalized Tax Rate})$) using an **EV/NOPAT** exit multiple, then bridge explicitly from Enterprise Value to Equity Value.
+- Currency pair.
+- Current spot exchange rate.
+- Source.
+- Exact valuation date.
 
-   * **Complete EV-to-Equity Bridge:** Account for positive excess cash (haircutted), any negative excess cash shortfall (deducted at **100%** as additional debt), long-term non-operating investments / wealth-management products (haircutted where appropriate), total debt (at 100%), non-controlling interests / NCI (at 100%), and preferred shares (at 100%).
+Use:
 
-   * **Lease Consistency Rule:** Under US GAAP, operating lease expense sits fully inside EBIT—either (a) include operating lease liabilities in Total Debt *and* add implied lease interest back to EBIT, or (b) exclude operating leases from *both* Debt and EBIT. Under IFRS 16 (where lease interest is already below EBIT), include lease liabilities in Debt consistently.
+`[Market Data: FX Source, Rate, Exact Date]`
 
-4. **NO DOUBLE-COUNTING SBC:** Never deduct Share-Based Compensation (SBC) from earnings *and* simultaneously model gross SBC share dilution in the projected share count. Choose one consistent convention in Phase 3 and match Phase 1 Owner Earnings and peer multiples to the exact same basis (GAAP vs. Non-GAAP).
+Apply the current valuation-date FX rate to translate:
 
-5. **SEPARATE PHYSICS FROM SENTIMENT:** Model (a) operating business cash generation, (b) market valuation multiple regimes, and (c) discrete catastrophic tail risks separately, and cross-check off-diagonal combinations (e.g., strong earnings with a stagnant multiple) on the Phase 3 $3 \times 3$ cross-grid.
+- Historical income statements.
+- Historical balance sheets.
+- Historical cash-flow statements.
+- Revenue, EBIT, NOPAT and free cash flow.
+- Cash, debt and non-operating investments.
+- Dividends and buybacks.
+- Market capitalization and enterprise value.
+- Terminal values and catastrophe recoveries.
 
-6. **ENFORCE THE LAW OF LARGE NUMBERS:** High growth rates must decay naturally as revenue scale approaches addressable market (TAM) limits. Never extrapolate hyper-growth linearly for 5 years.
+**Do not use the historical FX translations presented in old annual reports or quarterly filings for the analytical USD conversion.**
 
-7. **STRICT 3-TIER INPUT LABELING & OFFLINE FALLBACK:** Tag every numerical input as:
+Historical financial statements should be translated from their original reported currency at today's spot FX rate. This creates a constant-FX analytical comparison.
 
-   * `[Filing: Document, Period, Line Item]`
+Do not translate an already USD-denominated financial figure a second time.
 
-   * `[Market Data: Source, Date]` (mandatory for current stock price, FX rate, and named peer multiples/dates)
+If the security trades in a currency different from the reporting currency, convert the trading price and the financial statements separately using their respective current spot rates.
 
-   * `[Assumption]`
+### Future cash-flow convention
 
-   * **Missing Data & Offline Fallback Rule:** If a required figure is missing, write `"not provided"` rather than estimating or inventing it.
+Hold valuation-date spot FX constant throughout the five-year projection.
 
-     * *Missing Price or FX Rate:* Check the user's attached materials for a recent price/FX (cite the exact date and note staleness). If completely absent and no live web access is available, halt before Phase 3 IRR calculations and request the current price and FX rate from the user.
+Convert all projected dividends, cash balances, debt, terminal values and recovery proceeds into USD using that same FX assumption.
 
-     * *Missing Peer Multiples (No Web Access):* Mark Phase 3 Anchor 1 as `"not provided — offline fallback active"`, anchor Exit EV/NOPAT strictly to **Anchor 2** (the company's own historical multiple band, if derivable from filings/attachments) and the **Trailing Formula Cross-Check**, and explicitly flag the absence of peer triangulation.
+Do not introduce future exchange-rate forecasts or a separate currency sensitivity analysis.
 
-## Required Analysis Structure
+### Currency reporting
 
-### Executive Return Summary (At a Glance — Output First!)
+Always show:
 
-Begin every valuation report with a **plain-English Executive Return Summary** so the investor sees the bottom line immediately before reading Phases 1–6:
+- Original reporting currency.
+- Original security trading currency.
+- Current reporting-to-USD exchange rate.
+- Current trading-currency-to-USD exchange rate.
+- USD-equivalent share price.
+- All valuation results in USD.
 
-* **Headline Callout:** State **Today's Price (`YYYY-MM-DD`)**, **Expected 5-Year Target Price (by `YYYY+5`)**, **Expected Total 5-Year Return (`+X%`)**, **Annualized Return (`Y%/yr`)**, **Hurdle Verdict (`CLEARS` / `FAILS`)**, and **Max Position Weight (`Z%`)**.
-* **Plain-English Return Table (by Target Year `YYYY+5`):**
+The exact tradable share or ADS count remains unchanged by currency conversion.
 
-| Scenario | Probability | Horizon | Target Price (Home CCY) | Total % Return | Annualized (IRR) | \$10,000 Becomes |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Catastrophe** | | Year $t_{\text{cat}}$ (`YYYY`) | | | | |
-| **Bear (Stagnation)** | | Year 5 (`YYYY+5`) | | | | |
-| **Base (Normalized)** | | Year 5 (`YYYY+5`) | | | | |
-| **Bull (Re-Rating)** | | Year 5 (`YYYY+5`) | | | | |
-| **Expected (Probability-Weighted)** | **100%** | **5 Years (`YYYY+5`)** | | **+X%** | **+Y%/yr** | **\$XX,XXX** |
+Every reported scenario IRR and the probability-weighted Expected IRR must be a USD return.
 
-### Phase 1: Forensic Baseline, Clean Run-Rate & Zero-Growth Floor
+---
 
-Extract or compute from the latest quarterly/annual reports and current market data:
+# Executive Return Summary — Output First
 
-* **Share-Class & ADS Ratio Normalization (`[Filing]`):** State explicitly whether the quoted security is an ADS/ADR or ordinary share, and document the exact conversion ratio (`1 ADS = N Ordinary Shares`, or `"not applicable — ordinary shares"`). Convert all share counts, per-share earnings, and dividends onto the exact same tradable unit before performing any calculations.
+Begin every valuation report with the numerical results.
 
-* **Market & Capital Structure Snapshot:** Current Share/ADS Price (`[Market Data: Source, Date]`), FX Rate (`[Market Data: Source, Date]`), Diluted Share/ADS Count, Market Cap, Enterprise Value (EV), Reported TTM Revenue, EBIT, Net Income (GAAP & Non-GAAP), Net Interest Income/(Expense), TTM EV/NOPAT, Run-Rate EV/NOPAT, and Price-to-Book (P/B).
+## Headline
 
-* **One-Time Item Scrub & Tax Normalization (Clean Earnings Bridge):**
+State:
 
-  * Review the latest 4 quarters line-by-line and strip out genuine non-recurring items (e.g., asset sale gains/losses, one-off tax windfalls, legal settlements, mark-to-market investment swings, one-time FX/impairment shocks) to produce **Clean Quarterly EBIT and NOPAT**.
+- Today's share/ADS price in original trading currency and USD.
+- Valuation date: `YYYY-MM-DD`.
+- Base Case Year 5 target price per share/ADS in USD.
+- Bear Case 5-year IRR.
+- Base Case 5-year IRR.
+- Bull Case 5-year IRR.
+- Probability-weighted Expected 5-year IRR.
+- Expected cumulative MOIC and Expected Total Return (%).
+- Probability of capital loss.
+- 5th-percentile outcome.
 
-  * *Skepticism Rule:* Reject "recurring non-recurring" exclusions. If restructuring, inventory write-downs, or acquisition charges appear repeatedly across years, leave them in as real operating expenses.
+Do not include personal hurdle-rate verdicts, buy/sell verdicts based on arbitrary return thresholds or portfolio recommendations.
 
-  * *Normalized Tax Rate:* Compute NOPAT using a normalized long-run effective tax rate. Explicitly flag expiring tax holidays, preferential rates, or temporary tax credits.
+## Scenario return table
 
-* **Seasonality Check & Recency-Weighted Run-Rate:**
+| Scenario | Probability | Realization Horizon | Terminal/Recovery Price (USD) | MOIC | Total Return | Annualized IRR | \$10,000 Cumulative Proceeds |
+| :--- | ---: | :--- | ---: | ---: | ---: | ---: | ---: |
+| Catastrophe | | Year $t_{\text{cat}}$ | | | | | |
+| Bear | | Year 5 | | | | | |
+| Base | | Year 5 | | | | | |
+| Bull | | Year 5 | | | | | |
+| **Expected** | **100%** | **Weighted cash flows** | **—** | | | | |
 
-  * Check historical quarterly revenue and margin splits (last 2–3 years) to determine whether the business is seasonal.
+For the Catastrophe scenario, show the actual event-year recovery and annualized return over the actual time to recovery.
 
-  * **For non-seasonal / fast-growing / inflecting companies:** Weight the latest 1–2 clean quarters heavily (e.g., annualized latest clean quarter or $\text{L2Q} \times 2$) rather than letting stale TTM quarters drag down—or artificially prop up—the baseline.
+For the Expected scenario, calculate Expected IRR from the probability-weighted dated cash-flow vector, not by averaging scenario IRRs.
 
-  * **For seasonal companies:** Do *not* blindly multiply the latest quarter by 4. Compute a **Seasonally Adjusted Run-Rate** by dividing the latest clean quarter by its historical share of annual revenue/earnings (or by applying the latest 1–2 quarters' clean YoY growth rate to the prior clean full year).
+Show expected cumulative proceeds separately from annualized Expected IRR. Do not imply that catastrophe proceeds received in Year 2 have the same realization date as terminal proceeds received in Year 5.
 
-  * **Year 0 Starting Base Rule:** Explicitly state whether **Clean TTM** (best for mature/cyclical businesses) or **Seasonally Adjusted Clean Run-Rate** (best for fast-growing or structurally shifting businesses) is used as the Year 0 starting point for Phase 3, and show the gap between the two.
+Do not invent a single expected terminal share price when the scenarios have different realization dates.
 
-* **Starting Balance Sheet Bridge & Historical Capital Intensity (Sourced from Filings):**
+---
 
-  * Separate unrestricted corporate cash & short-term investments from restricted/pledged cash, segregated client cash, and required regulatory/working-capital cash buffers to isolate **Starting Excess Cash**.
+# Phase 1: Forensic Baseline, Clean Run-Rate & Zero-Growth Floor
 
-  * List **Long-Term Non-Operating Investments / Wealth-Management Products**, **Total Debt** (applying Rule 3's Lease Consistency Rule), **Non-Controlling Interests (NCI)**, and **Preferred Shares**.
+## 1.1 Share-class and ADS normalization
 
-  * **Historical Invested Capital & Sales-to-Capital Ratio (`[Filing]`):** Confirm whether the balance sheet's headline equity line is **Parent Stockholders' Equity** or consolidated **Total Equity** (which already includes NCI) so NCI is never double-counted:
+`[Filing: Document, Period, Line Item]`
+
+Establish:
+
+- Exact quoted security: ordinary share, ADR or ADS.
+- Exact conversion ratio: `1 ADS = N ordinary shares`, or `"not applicable — ordinary share."`
+- Latest diluted ordinary share count.
+- Latest diluted ADS count.
+- Earnings per ordinary share and ADS.
+- Dividends per ordinary share and ADS.
+
+Normalize all valuations, earnings and dividends to the exact tradable security unit.
+
+Never mix ordinary shares and ADSs within a calculation.
+
+## 1.2 Market and capital-structure snapshot
+
+`[Market Data: Source, Date]`
+
+| Metric | USD Value |
+| :--- | ---: |
+| Current share/ADS price | |
+| Current original trading-currency price | |
+| Trading-currency-to-USD FX | |
+| Reporting-currency-to-USD FX | |
+| Diluted shares/ADSs | |
+| Market capitalization | |
+| Enterprise value | |
+| TTM revenue | |
+| Reported TTM EBIT | |
+| Clean TTM EBIT | |
+| GAAP net income | |
+| Non-GAAP net income | |
+| Net interest income/(expense) | |
+| TTM NOPAT | |
+| TTM EV/NOPAT | |
+| Run-rate EV/NOPAT | |
+| Price-to-book | |
+
+State the EV calculation convention explicitly.
+
+Separate unrestricted corporate cash from restricted cash, segregated client funds and required regulatory or working-capital buffers.
+
+Show conventional market EV/NOPAT separately from the cash-haircut-adjusted equity valuation where the distinction matters.
+
+All USD financial figures must be converted at the valuation-date spot FX rate.
+
+## 1.3 One-time item scrub and normalized taxation
+
+Review the latest four quarterly financial statements line by line.
+
+Remove genuine non-recurring items, including:
+
+- Asset disposal gains and losses.
+- Genuine one-off legal settlements.
+- Exceptional impairment charges.
+- Non-recurring tax windfalls.
+- Exceptional mark-to-market investment gains and losses.
+- Clearly identifiable one-time FX shocks.
+
+Do not remove recurring expenses disguised as exceptional items.
+
+If restructuring, acquisition expenses, inventory write-downs or other adjustments recur across multiple years, retain them as real operating expenses.
+
+Produce:
+
+| Period | Reported EBIT | Adjustments | Clean EBIT | Normalized Tax | Clean NOPAT |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| Q-3 | | | | | |
+| Q-2 | | | | | |
+| Q-1 | | | | | |
+| Latest Q | | | | | |
+| Clean TTM | | | | | |
+
+Use:
 
 $$
-\text{Invested Capital} = \text{Parent Stockholders' Equity} + \text{NCI} + \text{Total Debt} + \text{Preferred Shares} - \text{Unrestricted Cash \& Non-Op Investments}
+\text{NOPAT} = \text{Clean EBIT} \times (1 - \text{Normalized Tax Rate})
 $$
 
+Explain the normalized long-run effective tax assumption.
+
+Explicitly identify expiring tax holidays, preferential rates and temporary tax credits.
+
+Do not mistake temporary tax advantages for sustainable profitability.
+
+## 1.4 Seasonality and recency-weighted run-rate
+
+Review quarterly revenue and operating margins over the previous 2–3 years.
+
+Determine whether the company is:
+
+- Seasonal.
+- Non-seasonal and mature.
+- Growing rapidly.
+- Structurally inflecting.
+- Cyclical.
+
+For mature or cyclical businesses, prefer Clean TTM as the starting base.
+
+For fast-growing or structurally shifting businesses, weight the latest one or two clean quarters more heavily.
+
+For seasonal businesses, calculate a seasonally adjusted run-rate rather than blindly multiplying the latest quarter by four.
+
+Explicitly identify the Year 0 starting base:
+
+- Clean TTM; or
+- Seasonally Adjusted Clean Run-Rate.
+
+Show the difference between the two.
+
+If annualizing the latest quarter or latest two quarters, adjust Year 1 growth downward so intra-year growth already embedded in the starting base is not counted twice.
+
+## 1.5 Starting balance-sheet bridge
+
+Separate:
+
+1. Unrestricted corporate cash.
+2. Short-term investments.
+3. Restricted and pledged cash.
+4. Segregated client cash.
+5. Required regulatory and operating cash buffers.
+6. Long-term non-operating investments and wealth-management products.
+7. Total debt.
+8. Non-controlling interests.
+9. Preferred shares.
+
+Calculate Starting Excess Cash after deducting the operating, regulatory and working-capital cash requirements.
+
+Translate each balance-sheet amount into USD using valuation-date spot FX.
+
+Negative excess cash remains negative and is not eligible for a cash haircut.
+
+### Lease consistency
+
+- **US GAAP:** Operating lease liabilities may be included in Total Debt only if the corresponding implied lease interest is added back to EBIT.
+- **IFRS 16:** Include lease liabilities in Total Debt consistently with the accounting treatment, where lease interest is already below EBIT.
+
+Never include lease liabilities in debt while simultaneously leaving the corresponding lease expense inside operating earnings without adjustment.
+
+## 1.6 Historical invested capital and capital intensity
+
+Establish whether the reported equity line is Parent Stockholders' Equity or consolidated Total Equity.
+
+Use:
+
 $$
-\text{Historical Sales-to-Capital} = \frac{\text{TTM Revenue}}{\text{Average Invested Capital}}
+\text{Invested Capital} = \text{Parent Stockholders' Equity} + \text{NCI} + \text{Total Debt} + \text{Preferred Shares} - \text{Unrestricted Cash} - \text{NonOp Investments}
 $$
 
-    Also compute the 3-year incremental capital intensity $\frac{\Delta \text{Revenue}}{\sum (\text{CapEx} - \text{D\&A} + \Delta \text{NWC} + \text{Cash Acquisitions})}$ where filings allow. *(If Invested Capital is negative or near zero due to negative working capital, note this explicitly and derive historical net reinvestment directly as a percentage of incremental revenue.)*
+If the reported headline equity already includes NCI, do not add NCI again.
 
-* **Ex-Cash Unlevered Payback Time:** At current normalized Unlevered Owner Earnings ($\text{Clean NOPAT} + \text{D\&A} - \text{Maintenance CapEx}$, aligned with the SBC convention chosen in Phase 3), how many years of cumulative unlevered cash flow equal today's **Enterprise Value** (assuming **0% growth**)?
-
-* **Reverse Valuation (Embedded Expectations):** Perform two explicit solves from today's home-currency entry price using the **Target Hurdle Rate ($H$)** defined above:
-
-  1. **Implied Growth Solve:** What 5-year NOPAT CAGR is required to achieve (a) a **0% IRR** (break-even) and (b) the **Target Hurdle Rate ($H$)** at the Base Case exit multiple?
-
-  2. **Implied Multiple Solve:** What Year 5 exit multiple is required to achieve the **Target Hurdle Rate ($H$)** assuming Base Case Year 5 earnings?
-
-### Phase 2: Capital Allocation & "Value Trap" Audit (Grade: A to F)
-
-Cheap stocks stay cheap if cash leaks or sits dead. Audit and score:
-
-1. **Cash Conversion:** Operating Cash Flow vs. Net Income / NOPAT (flag working-capital drains or low-quality earnings).
-
-2. **Executed Shareholder Yield *(Diagnostic Only)*:** Active Dividends (net of withholding tax) $+$ *Executed* Buybacks (ignore unexecuted authorizations; verify actual treasury stock / share count reduction over the past 2–3 years) $-$ Share-Based Compensation (SBC) dilution $=$ **Net Shareholder Yield %**. *(Label this metric strictly as a **diagnostic payout-quality gauge**—do not carry its SBC dilution deduction into Phase 3 share counts if GAAP Option (a) is chosen.)* Record the company's **historical executed buyback pace** (as % of FCF and % of shares/year) to serve as the Phase 3 buyback cap.
-
-3. **Cash Credibility Haircut (Positive Cash & Non-Operating Investments Only):** Determine what \$1.00 of positive excess cash (and non-operating financial investments) is worth to minority shareholders at Year 5:
-
-   * *High-trust / active buybacks & dividends or high-ROIC reinvestment:* Credit at **80%–100%**.
-
-   * *Hoarded cash / sluggish buybacks / weak payout discipline:* Credit positive excess cash at **50%** in the Base Case.
-
-   * *Strict Debt & Shortfall Rule:* **Never** apply this haircut to Debt, NCI, Preferred Shares, or a negative excess cash balance—all senior claims and cash shortfalls are deducted at **100%**.
-
-### Phase 3: 5-Year 3-Engine Return Decomposition (Years 1–5)
-
-*Start Year 1 projections from the **Year 0 Starting Base** established in Phase 1. If Year 0 is an annualized latest quarter (or L2Q), adjust Year 1 growth downward so you do not double-count intra-year growth already embedded in the run-rate.*
-
-#### Business-Type Metric Router (Select Primary Valuation Engine)
-
-* **Standard Operating Companies with Positive NOPAT (Default):** Use **Unlevered EV/NOPAT** (detailed below).
-
-* **Pre-Profit / Negative-NOPAT Companies:** Do NOT apply an EV/NOPAT multiple to negative earnings. Either model an explicit operating bridge to positive Year 5 normalized NOPAT (assigning elevated Bear/Catastrophe probabilities for execution risk) or value via **EV/Sales** anchored to steady-state operating margins and unit economics.
-
-* **Financials / Banks / Insurers:** Do NOT use EV/NOPAT. Use **Price-to-Book (P/B) anchored to Normalized ROE** and excess capital returns.
-
-* **Deep Cyclicals:** Normalize Year 5 margins to **mid-cycle averages** (never extrapolate peak or trough margins).
-
-* **Heavy Reinvestment / Low-Current-Margin Compounders:** Use **EV/FCF** or steady-state unit economics once reinvestment normalizes.
-
-#### Core Valuation Formula (Default Operating Company)
-
-Build a year-by-year projection table for three survival operating scenarios (**Bear / Stagnation**, **Base / Normalized**, **Bull / Cycle Recovery**):
+Historical Sales-to-Capital:
 
 $$
-\text{Year 5 Enterprise Value} = \text{Year 5 Unlevered NOPAT} \times \text{Year 5 Exit EV/NOPAT}
+\text{Sales-to-Capital} = \frac{\text{TTM Revenue}}{\text{Average Invested Capital}}
 $$
 
-$$
-\text{Credited Year 5 Excess Cash} = \left(\max(\text{Year 5 Excess Cash},\ 0) \times \text{Cash Haircut}\right) + \min(\text{Year 5 Excess Cash},\ 0)
-$$
+Also calculate 3-year incremental capital intensity:
 
 $$
-\text{Year 5 Equity Bridge} = \text{Credited Year 5 Excess Cash} + \left(\text{Year 5 Non-Op Investments} \times \text{Inv. Haircut}\right) - \text{Year 5 Total Debt} - \text{NCI} - \text{Preferred Shares}
+\text{Incremental Capital Intensity} = \frac{\Delta \text{Revenue}}{\sum(\text{CapEx} - \text{D\&A} + \Delta \text{NWC} + \text{Cash Acquisitions})}
 $$
 
+If invested capital or incremental reinvestment is negative or near zero due to negative working capital, explain this explicitly.
+
+Where necessary, derive historical net reinvestment directly as a percentage of incremental revenue.
+
+Do not manufacture meaningful ratios from unsuitable denominators.
+
+## 1.7 Ex-cash unlevered owner-earnings payback
+
+Calculate:
+
 $$
-\text{Year 5 Terminal Value per Share} = \frac{\text{Year 5 Enterprise Value} + \text{Year 5 Equity Bridge}}{\text{Year 5 Diluted Shares}}
+\text{Unlevered Owner Earnings} = \text{Clean NOPAT} + \text{D\&A} - \text{Maintenance CapEx}
 $$
 
-*(Note: Because $\min(\text{Year 5 Excess Cash},\ 0)$ is negative whenever distributions exceed available cash, any funding shortfall is automatically deducted at **100%** as additional debt rather than vanishing.)*
+Ensure the SBC convention matches the convention selected in Phase 3.
 
-#### Required Component Formulas
+Calculate:
 
-* **Unlevered Operating Earnings (NOPAT):**
+$$
+\text{ExCash Payback} = \frac{\text{Current Enterprise Value}}{\text{Normalized Unlevered Owner Earnings}}
+$$
+
+This measures the number of years of zero-growth unlevered owner earnings required to equal today's enterprise value.
+
+## 1.8 Reverse valuation: break-even growth
+
+Calculate the 5-year NOPAT CAGR required to produce a 0% USD investment IRR at the Base Case exit multiple.
+
+Use the full valuation framework, including:
+
+- Current USD entry price.
+- Normalized starting earnings.
+- Reinvestment.
+- Cash and debt evolution.
+- Net dividends.
+- Buybacks.
+- Diluted share count.
+- Terminal equity value.
+- Constant valuation-date FX.
+
+Solve mathematically for the required NOPAT growth rate.
+
+Do not calculate the growth rate or exit multiple required to meet a personal return target.
+
+---
+
+# Phase 2: Capital Allocation & Value-Trap Audit
+
+Grade capital allocation quality from A to F.
+
+Evaluate the quality, accessibility and productive use of company cash. Do not introduce investor-specific portfolio considerations.
+
+## 2.1 Cash conversion
+
+Compare:
+
+- Operating cash flow.
+- Net income.
+- NOPAT.
+- Free cash flow.
+
+Identify:
+
+- Persistent working-capital drains.
+- Weak cash conversion.
+- Capitalized costs.
+- Low-quality earnings.
+- Unusual receivables or inventory growth.
+- Excessive acquisition dependence.
+
+Use multi-year evidence, not just a single quarter.
+
+All figures must be in USD at the valuation-date spot FX rate.
+
+## 2.2 Executed shareholder yield — diagnostic only
+
+Calculate:
+
+$$
+\text{Net Shareholder Yield} = \text{Net Dividends} + \text{Executed Buybacks} - \text{SBC Dilution}
+$$
+
+Verify actual treasury stock reductions and diluted share-count movements over the previous 2–3 years.
+
+Ignore unexecuted buyback authorizations.
+
+Report:
+
+- Net dividend yield.
+- Actual buybacks as a percentage of free cash flow.
+- Shares repurchased annually.
+- Historical annual share-count reduction.
+- SBC dilution.
+- Net shareholder yield.
+
+This metric is strictly a diagnostic payout-quality gauge.
+
+Do not carry the SBC deduction into Phase 3 if the GAAP SBC convention is selected.
+
+Record the historical executed buyback pace as the maximum reference pace for modeled future repurchases.
+
+## 2.3 Cash credibility haircut
+
+Determine how much \$1.00 of positive excess cash and non-operating investments is realistically worth to minority shareholders at Year 5.
+
+Consider:
+
+- Actual dividend execution.
+- Actual buyback execution.
+- Cash repatriation.
+- Reinvestment quality.
+- Management's capital allocation history.
+- Restrictions on cash access.
+
+Guidance:
+
+| Cash credibility | Base valuation credit |
+| :--- | ---: |
+| High trust and proven distribution discipline | 80–100% |
+| Hoarded cash or weak payout discipline | 50% |
+| Severe restrictions | Explicitly justified lower percentage |
+
+Apply this haircut only to positive excess cash and non-operating investments.
+
+Never apply the haircut to:
+
+- Debt.
+- Negative excess cash.
+- NCI.
+- Preferred shares.
+
+All senior claims and shortfalls are deducted at 100%.
+
+For foreign-listed companies, explicitly distinguish cash held offshore from cash held in jurisdictions where repatriation is restricted.
+
+---
+
+# Phase 3: Five-Year Operating and Valuation Model
+
+## 3.1 Business-type valuation router
+
+Select the valuation engine based on the economics of the business.
+
+- **Standard operating companies with positive NOPAT:** Unlevered EV/NOPAT.
+- **Pre-profit or negative-NOPAT companies:** Explicit operating bridge to positive Year 5 normalized NOPAT or EV/Sales based on steady-state margins and unit economics.
+- **Banks and insurers:** P/B anchored to normalized ROE and excess capital returns.
+- **Deep cyclicals:** Normalize Year 5 margins to mid-cycle levels.
+- **Heavy reinvestment compounders:** Use EV/FCF or steady-state unit economics when more representative.
+
+Do not apply an EV/NOPAT multiple to negative earnings.
+
+## 3.2 Three survival operating scenarios
+
+Construct:
+
+1. Bear — Stagnation.
+2. Base — Normalized.
+3. Bull — Cycle Recovery / Stronger Growth.
+
+These are scenarios conditional on survival.
+
+Existential risks belong exclusively in Phase 4.
+
+For each scenario, project Years 1–5:
+
+- Revenue.
+- Revenue growth.
+- Clean EBIT margin.
+- Clean EBIT.
+- Normalized tax.
+- NOPAT.
+- Reinvestment.
+- Unlevered FCF.
+- Net interest.
+- Dividends.
+- Buybacks.
+- Debt.
+- Excess cash.
+- Diluted shares.
+
+Revenue growth must decay naturally as the business approaches its addressable market.
+
+Never extrapolate hyper-growth linearly for five years without strong evidence.
+
+## 3.3 Unlevered NOPAT
 
 $$
 \text{NOPAT}_t = \text{Clean EBIT}_t \times (1 - \text{Normalized Tax Rate})
 $$
 
-* **Capital Cost of Growth (Filing-Anchored Sales-to-Capital FCF Link):** Tie reinvestment to **revenue expansion** (not NOPAT growth, so margin expansion is not falsely penalized as capital-hungry), with Year $t$ reinvestment funding Year $t+1$ revenue growth, floored at zero:
+Use Phase 1 normalized tax assumptions unless a clearly justified change is forecast.
+
+## 3.4 Reinvestment tied to revenue expansion
+
+Anchor Sales-to-Capital directly to Phase 1 filing-derived historical and incremental ratios.
 
 $$
-\text{Reinvestment}_t = \frac{\max(\text{Revenue}_{t+1} - \text{Revenue}_t,\ 0)}{\text{Sales-to-Capital Ratio}}
+\text{Reinvestment}_t = \frac{\max(\text{Revenue}_{t+1} - \text{Revenue}_t,\ 0)}{\text{Sales-to-Capital}}
 $$
 
 $$
 \text{Unlevered FCF}_t = \text{NOPAT}_t - \text{Reinvestment}_t
 $$
 
-  *Anchor the Sales-to-Capital Ratio directly to Phase 1's `[Filing]` Historical / Incremental Sales-to-Capital Ratio and explicitly justify any assumed divergence. For Year 5, derive $\text{Revenue}_6 - \text{Revenue}_5$ using the scenario's terminal growth rate $g$. Do not allow negative reinvestment in a shrinking Bear case unless explicit working-capital liquidation is documented from filings. Report implied Incremental ROIC $= \text{Incremental EBIT Margin} \times (1 - \text{Tax Rate}) \times \text{Sales-to-Capital Ratio}$ as a sanity check.*
+Reinvestment in Year $t$ funds the following year's revenue growth.
 
-* **5-Year Cash & Debt Roll-Forward (Including Net Interest):** Because Unlevered FCF excludes interest on cash and debt, add after-tax net interest back into the cash balance:
-
-$$
-\text{Year 5 Excess Cash} = \text{Starting Excess Cash} + \sum_{t=1}^{5} \text{Unlevered FCF}_t \pm \sum_{t=1}^{5} \text{After-Tax Net Interest}_t - \sum_{t=1}^{5} \text{Gross Dividends}_t - \sum_{t=1}^{5} \text{Buybacks}_t + \Delta \text{Debt}_{1\text{--}5}
-$$
-
-  *(Track Year 5 Excess Cash and Year 5 Total Debt separately so the Phase 2 Cash Credibility Haircut applies strictly to positive cash while any cash shortfall and all Debt remain at 100%.)*
-
-* **Unified Dated-Cash-Flow IRR & Home-Currency FX Rule:**
-
-  * Convert entry price, annual net dividends (after dividend withholding tax and annual ADR/custody fees), and Year 5 Terminal Value per Share into the investor's **home currency** using explicit FX assumptions (`[Assumption]`).
-
-  * Always compute **true dated-cash-flow IRR** from the annual home-currency cash-flow vector:
+For Year 5:
 
 $$
-CF_0 = -\text{Entry Price}, \quad CF_{1\text{--}4} = \text{Annual Net Dividends}, \quad CF_5 = \text{Year 5 Terminal Value} + \text{Year 5 Net Dividend}
+\text{Revenue}_6 = \text{Revenue}_5 \times (1 + g)
 $$
 
-    *(When interim dividends are zero, this simplifies mathematically to $\text{MOIC}^{1/5} - 1$.)*
+where $g$ is the terminal revenue growth assumption.
 
-#### Fundamental Sanity Checks & Scenario Assumptions
+Do not allow negative reinvestment in a shrinking Bear Case unless working-capital liquidation or capital release is explicitly documented.
 
-For each scenario, justify:
-
-1. **Mauboussin Base-Rate Check:** Compare Base and Bull revenue CAGRs and operating margins against historical reference-class distributions for companies of similar revenue scale and maturity. Justify any assumption sitting in the top decile of historical base rates.
-
-2. **Greenwald Moat & Margin Durability Test:** Briefly assess barriers to entry (customer captivity, scale economies, switching costs, regulatory licenses) to verify whether projected Base Case margins can persist without competitive erosion.
-
-3. **Share Count Dynamics (Diluted Base, Consistent SBC, Historical Buyback Cap & 1-Pass Pricing):**
-
-   * *Diluted Share Base Rule:* Start Year 0 share count from the latest filing's **Diluted Share/ADS Count** (never a lower basic or market-implied basic count, unless basic-only is explicitly justified when no dilutive instruments exist).
-
-   * *SBC Convention (Pick One & Match Peers/Phase 1):*
-
-     * **Option (a) — GAAP Basis:** Treat SBC as a real cash-equivalent expense already deducted inside GAAP NOPAT. Model **zero** gross SBC share dilution, and let **every dollar** of buybacks in the roll-forward retire shares. Anchor exit multiples strictly to GAAP peer multiples.
-
-     * **Option (b) — Non-GAAP Basis:** Add SBC back to operating earnings and model full gross annual share dilution from SBC. Anchor exit multiples strictly to Non-GAAP peer multiples.
-
-   * *Anti-Free-Lever Buyback Cap:* Cap assumed annual buybacks at the **executed historical pace** established in Phase 2 (so shifting cash from a 50%-haircutted balance sheet into 100%-credited buybacks cannot mechanically inflate returns). Exceeding the historical pace requires an explicit, concrete catalyst.
-
-   * *1-Pass Non-Circular Buyback Price Rule:* (1) Compute an initial Year 5 Terminal Value per Share assuming **zero buybacks**, (2) set each scenario's average repurchase price as the midpoint between today's price and that unadjusted Year 5 Value, and (3) compute retired shares and final Year 5 Terminal Value per Share in **one pass**.
-
-4. **Exit Multiple Benchmarking & Trailing Theoretical Cross-Check (Conditional on Survival):**
-
-   * **Anchor Precedence Rule (Deterministic Order):** Anchor the Base exit multiple in strict priority order: **(1) Anchor 1 (Named Global Peers)** when available → **(2) Anchor 2 (Company's Own 5–10Y Historical Band)** when Anchor 1 is offline → **(3) Trailing Formula Cross-Check** strictly as an economic sanity bound.
-   * **>20% Deviation Rule:** If the chosen Base exit multiple deviates by more than **20%** from the Trailing Formula Cross-Check (justified EV/NOPAT or justified P/B), explicitly justify the gap (e.g., cyclical trough/peak, temporary ROE overhang, or structural discount).
-
-   * **Anchor 1 — Named Global Peer Group:** List specific peers, exact date (`[Market Data: Source, Date]`), GAAP vs. Non-GAAP basis, and **through-cycle median** EV/NOPAT multiples. Flag if peers sit at a cyclical peak or trough. *(If offline with no peer data provided, invoke Rule 7's Offline Fallback explicitly.)*
-
-   * **Anchor 2 — Company's Own 5–10 Year Multiple Band:** Compare projected exit multiples to the company's own historical valuation range.
-
-   * **Explicit Trailing Formula Cross-Check (Using $\text{RONIC}$ & Ungoverned-$r$ Guardrail):** Because Year 5 Enterprise Value multiplies **Year 5 (trailing)** NOPAT, verify economic consistency using the trailing Gordon-growth multiple with terminal growth $g$, terminal incremental return on new invested capital $\text{RONIC}$ (`[Assumption]`, not legacy sunk ROIC), and a transparently justified market required return $r$ (`[Assumption]`):
+Calculate:
 
 $$
-\text{Implied Trailing Exit EV/NOPAT} = \frac{(1 + g)\left(1 - \frac{g}{\text{RONIC}}\right)}{r - g}
+\text{Incremental ROIC} = \text{Incremental EBIT Margin} \times (1 - \text{Tax Rate}) \times \text{Sales-to-Capital}
 $$
 
-     * *Anti-Circularity Rule:* Justify $r$ independently as the **institutional/market long-run nominal cost of capital** (anchored to the passive global equity baseline $r_{\text{base}}$ plus any business-risk spread). **Strictly forbid setting $r = H$**, as equating $r$ to your personal alpha hurdle turns the cross-check into a tautology.
+Use this to test the economic plausibility of projected reinvestment and growth.
 
-     * *Sensitivity Band:* Display the implied trailing exit multiple across a **$r \pm 200\text{ bps}$** range so sensitivity to $r$ is explicit.
+## 3.5 SBC convention
 
-   * *Correlation Check:* Confirm that the Bear Case multiple prices **operating stagnation**, NOT the existential tail risk modeled in Phase 4.
+Select one convention and use it consistently.
 
-5. **Physics vs. Sentiment $3 \times 3$ Scenario Cross-Grid:** Present a $3 \times 3$ table mapping **Year 5 NOPAT** (Bear, Base, Bull as rows) against **Year 5 Exit EV/NOPAT Multiple** (Bear, Base, Bull as columns), displaying the home-currency 5-year IRR in every cell. Recompute and verify **all 9 cells** from the stated row earnings/book, diluted share count, and column exit multiple; the center cell `(Base, Base)` must match the Phase 3 Base Case IRR exactly, and any quoted Base Case range must reconcile directly with the grid cells.
+**Option (a) — GAAP basis (preferred default):**
 
-6. **Home-Currency FX Sensitivity Strip:** Directly beneath the $3 \times 3$ grid, report both the **Base Case IRR** and **Expected IRR** across three 5-year reporting-currency-vs.-home-currency FX paths: **$-20\%$ (reporting currency depreciation)**, **Base FX**, and **$+20\%$ (reporting currency appreciation)**.
+- Treat SBC as a real compensation expense already deducted in GAAP EBIT and NOPAT.
+- Do not add it back.
+- Model zero additional gross future SBC dilution.
+- Start with the filing's diluted share count.
+- Every modeled dollar of buybacks retires shares.
+- Use GAAP peer multiples.
 
-### Phase 4: Discrete Tail-Risk, Distribution Stats & Probability-Weighted Return
+**Option (b) — Non-GAAP basis:**
 
-Model **discrete existential loss-of-control risk** (fraud, insolvency, expropriation, unconvertible delisting) as a 4th scenario state. **Derive every probability from concrete evidence** (audit quality, leverage, regulatory/legal history, customer concentration)—never use default point percentages. Probabilities must sum to **100%**.
+- Add SBC back to operating earnings.
+- Model full gross annual share dilution from SBC.
+- Use Non-GAAP peer multiples.
 
-* **Evidence-Gated Probability Calibration Bounds:**
+Never deduct SBC from earnings while also modeling the same compensation as additional gross share dilution.
 
-  * **Catastrophe Ceiling ($\le 2\%$):** Cap Catastrophe at $\le 2\%$ *only* when zero structural triggers exist (clean audit opinion, developed-market direct equity, interest coverage $> 3\text{x}$, no acute regulatory/sanction exposure). Require higher evidence-backed probabilities whenever VIE structure, high leverage, audit flags, or concentrated regulatory risk exist.
+Match the selected convention across Phase 1 owner earnings, Phase 2 diagnostic reporting, Phase 3 earnings and share count, and Phase 3 peer multiples.
 
-  * **Bear Minimum Floor ($\ge 20\%\text{–}25\%$):** Assign at least $20\%\text{–}25\%$ to the Bear state for any cyclical, rate-sensitive, or leveraged business.
+## 3.6 Diluted share count and executed buyback discipline
 
-* **Explicit Catastrophe Timing & Gross-Cash Recovery Build (No Default $-100\%$):**
+Start from the latest filing's diluted ordinary share or ADS count.
 
-  * State an explicit assumed catastrophe event year $t_{\text{cat}}$ (e.g., Year 2 or Year 3, `[Assumption]`) and use the projected balance sheet at $t_{\text{cat}}$ (not Year 5).
+Never use a lower basic count unless no dilutive instruments exist and this is explicitly justified.
 
-  * Use **gross** offshore cash (never net cash) so debt/senior claims are deducted exactly once, floored at $0$ for limited-liability equity:
+Cap modeled annual buybacks at the historical executed pace established in Phase 2.
 
-$$
-\text{Catastrophe Equity Value}_{t_{\text{cat}}} = \max\left(0,\ \left(\text{Surviving Offshore Unrestricted Gross Cash}_{t_{\text{cat}}} \times \text{Recovery \%}\right) + \text{Recoverable Non-Domestic Assets}_{t_{\text{cat}}} - \text{Senior Claims}_{t_{\text{cat}}}\right)
-$$
+Exceeding that pace requires an explicit and concrete catalyst.
 
-  * Include any net dividends actually collected *prior* to $t_{\text{cat}}$ at their exact dates in the home-currency cash-flow vector, with terminal recovery at $t_{\text{cat}}$ and zero cash flows thereafter. Explicitly distinguish partial impairment from total ($-100\%$) loss.
+### One-pass repurchase calculation
 
-| Scenario | Probability (%) | Year 5 NOPAT | Exit Multiple | Terminal Value/Share (Home CCY) | Total Return (%) | 5-Year IRR (Home CCY) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Catastrophe (at $t_{\text{cat}}$)** | [Evidence-based] | — | — | [Explicit recovery build] | | |
-| **Bear (Stagnation)** | [Evidence-based] | | | | | |
-| **Base (Normalized)** | [Evidence-based] | | | | | |
-| **Bull (Re-Rating)** | [Evidence-based] | | | | | |
-| **Expected Value (Weighted)** | **100%** | — | — | **Weighted Price** | **Weighted %** | **Expected IRR** |
+Avoid circular buyback pricing:
 
-* **Unified Expected IRR Rule (Probability-Weighted Annual Cash-Flow Vector):**
+1. Calculate initial Year 5 terminal value per share assuming zero future buybacks.
+2. Calculate average repurchase price as the midpoint between today's USD share price and the unadjusted Year 5 USD value.
+3. Calculate retired shares from the scenario's modeled buyback amount.
+4. Recalculate final diluted Year 5 shares and terminal value per share once.
 
-  * Compute Expected IRR directly as the **IRR of the probability-weighted annual home-currency cash-flow vector**:
+Do not iterate or optimize the result.
 
-$$
-CF_0 = -\text{Entry Price}, \quad CF_t = \sum_{i} p_i CF_{i,t} \quad \text{for } t = 1 \dots 5
-$$
+Apply the method consistently to the Base, Bear and Bull scenarios and the $3 \times 3$ cross-grid.
 
-    *(Placing Catastrophe recovery at $t_{\text{cat}}$ and survival terminal values at $t = 5$. Never take a probability-weighted average of individual scenario IRRs.)*
+## 3.7 Five-year cash and debt roll-forward
 
-* **Base-Probability Sensitivity Test ($\pm 10\text{ pp}$ Shift):** Recompute Expected IRR when shifting $p(\text{Base})$ by **$-10\text{ pp}$** and **$+10\text{ pp}$** (reallocating to/from Bear and Catastrophe) to show whether the hurdle verdict flips. Explicitly flag if the recommendation clears $H$ only when $p(\text{Base}) \ge 60\%$.
-
-* **Full Distribution Stats (Not Just the Mean):**
-
-  * **Base Case Value & IRR Range:** Quote a realistic range around the Base Case point estimate (from the $3 \times 3$ cross-grid) to avoid false precision.
-
-  * **Median Outcome:** State the exact scenario state where cumulative probability (ordered from lowest to highest MOIC) crosses **50%**, and compare it to the Mean (Expected Value).
-
-  * **Probability of Capital Loss:** Sum the probabilities of all scenarios with $\text{MOIC} < 1.0\text{x}$.
-
-  * **5th-Percentile Outcome:** State the scenario outcome where cumulative probability (ordered from lowest to highest MOIC) crosses **5%**.
-
-### Phase 5: Decision Matrix, Sizing & Thesis-Killers
-
-Conclude concisely with:
-
-1. **Asymmetry Ratio (All 4 States):**
+Track excess cash, non-operating investments and debt separately.
 
 $$
-\text{Asymmetry Ratio} = \frac{\text{Probability-Weighted Expected Gain}}{\text{Probability-Weighted Expected Loss}}
+\text{Year 5 Excess Cash} = \text{Starting Excess Cash} + \sum_{t=1}^{5} \text{Unlevered FCF}_t + \sum_{t=1}^{5} \text{AfterTax NetInterest}_t - \sum_{t=1}^{5} \text{Gross Dividends}_t - \sum_{t=1}^{5} \text{Buybacks}_t + \Delta \text{Debt}_{1-5}
 $$
 
-   *(Where $\text{Gain} = \max(\text{MOIC} - 1,\ 0)$ and $\text{Loss} = \max(1 - \text{MOIC},\ 0)$ for each scenario. If Expected Loss $= 0$, state `"No modeled capital-loss state"` rather than dividing by zero.)*
+After-tax net interest is cash interest income less debt interest expense, adjusted for the applicable tax treatment.
 
-2. **Hurdle Rate & Opportunity-Cost Verdict:**
+A positive change in debt represents net new borrowing. A negative change represents net debt repayment.
 
-   * Compare the home-currency, net-of-friction **Expected 5-Year IRR** directly against the **Target Hurdle Rate ($H$)**.
+Track resulting Year 5 debt separately.
 
-   * State your own passive global equity index expected annual return baseline $r_{\text{base}}$ (`[Assumption]` with brief justification) and confirm whether the active spread compensates for concentration and tail risk.
+Track non-operating investments separately from cash. Never count the same investment twice.
 
-3. **Position-Sizing Rule (Single-Stock Cap $\cap$ Worst-State Loss Cap $\cap$ Closed-Form Quarter-Kelly):**
+Gross dividends are deducted from corporate cash. Investor dividends in the IRR calculation are net of applicable withholding taxes and depositary/custody fees.
 
-   * **Worst-State Loss Cap (Zero-Drawdown Safe):** Let $D_{\max} = \max_i(1 - \text{MOIC}_i,\ 0)$ across all 4 states.
+Do not assume restricted or trapped cash can fund distributions.
 
-$$
-w_{\text{loss}} = \begin{cases} \dfrac{2.5\%}{D_{\max}} & \text{if } D_{\max} > 0 \\ 15\%\ (\text{Single-Stock Cap}) & \text{if } D_{\max} = 0 \end{cases}
-$$
+A cash funding shortfall must remain negative excess cash and be deducted at 100% in the terminal equity bridge.
 
-   * **Closed-Form Quarter-Kelly (Mean-Variance Approximation for 4 Discrete States):** Let each scenario's 5-year simple return be $R_i = \text{MOIC}_i - 1$, expected 5-year return $\bar{R} = \sum p_i R_i$, 5-year passive/risk-free baseline return $R_{\text{base}} = (1 + r_{\text{base}})^5 - 1$, excess return $\mu_{\text{ex}} = \bar{R} - R_{\text{base}}$, and variance $\sigma^2 = \sum p_i (R_i - \bar{R})^2$:
+Convert the entire roll-forward into USD using the valuation-date FX rates.
 
-$$
-w_{\text{QK}} = \begin{cases} \max\!\left(0,\ 0.25 \times \dfrac{\mu_{\text{ex}}}{\sigma^2}\right) & \text{if } \sigma^2 > 0 \\ 15\%\ \text{if } \mu_{\text{ex}} > 0,\ \text{else } 0\% & \text{if } \sigma^2 = 0 \end{cases}
-$$
+## 3.8 Year 5 terminal valuation
 
-   * **Final Position Cap:**
+For standard operating companies:
 
 $$
-\text{Max Weight} = \min\left(15\%,\ w_{\text{loss}},\ w_{\text{QK}}\right)
+\text{Year 5 Enterprise Value} = \text{Year 5 Unlevered NOPAT} \times \text{Exit EV/NOPAT}
 $$
 
-     *(Adjust downward further if stock liquidity or thesis conviction is low.)*
+Credited excess cash:
 
-4. **Top 3 Concrete Thesis-Killers:** Specific quarterly KPIs (e.g., cash conversion dropping below $X\%$, executed buybacks stalling below $Y$ past date $Z$, clean EBIT margin falling below $W\%$) that invalidate the thesis.
+$$
+\text{Credited Excess Cash} = \max(\text{Excess Cash}, 0) \times \text{Cash Haircut} + \min(\text{Excess Cash}, 0)
+$$
 
-### Phase 6: Mandatory Self-Audit (Consistency Checklist)
+Equity bridge:
 
-Before finalizing, output a brief **Pass / Fail** verification table confirming every critical rule was followed (if any check is `FAIL`, fix the calculation before outputting the verdict):
+$$
+\text{Equity Bridge} = \text{Credited Excess Cash} + (\text{NonOp Investments} \times \text{Investment Haircut}) - \text{Total Debt} - \text{NCI} - \text{Preferred Shares}
+$$
 
-| Audit Check | Status (`PASS` / `FAIL`) | Evidence / Line Check |
+Terminal value per tradable share:
+
+$$
+\text{Terminal Value Per Share} = \frac{\text{Enterprise Value} + \text{Equity Bridge}}{\text{Year 5 Diluted Shares}}
+$$
+
+All negative excess cash, debt, NCI and preferred shares are deducted at 100%.
+
+Do not apply the positive cash haircut to senior claims.
+
+All amounts are in USD.
+
+## 3.9 Exit multiple benchmarking
+
+Exit multiples are conditional on survival.
+
+Follow this deterministic anchor order.
+
+### Anchor 1 — Named global peers
+
+Provide:
+
+- Specific global peers (use the date-stamped Named Peer Group table in `Peers.md` whenever present).
+- Exact market-data date.
+- GAAP or Non-GAAP basis.
+- Through-cycle EV/NOPAT (or P/B for financials) multiples.
+- Median peer multiple.
+- Differences in growth and reinvestment ROIC.
+
+Peer discounts may reflect differences in growth and reinvestment economics only.
+
+Never embed governance, capital allocation or geopolitical risk discounts into survival multiples.
+
+Flag peers trading at cyclical peaks or troughs.
+
+### Anchor 2 — Company's own historical multiple band
+
+When peer data is unavailable, use the company's own 5–10-year historical valuation range, where derivable.
+
+Show historical low, median and high multiples and locate the proposed exit multiple within the range.
+
+### Anchor 3 — Trailing theoretical formula cross-check
+
+Use as an economic sanity check.
+
+$$
+\text{Implied Trailing EV/NOPAT} = \frac{(1 + g)\left(1 - \frac{g}{\text{RONIC}}\right)}{r - g}
+$$
+
+Where:
+
+- $g$ = normalized terminal NOPAT growth rate.
+- $\text{RONIC}$ = terminal incremental return on new invested capital.
+- $r$ = independently justified institutional/market long-run nominal required-return assumption.
+
+RONIC is an assumption about returns on future incremental investment, not legacy sunk capital.
+
+The $r$ assumption is used exclusively for the theoretical trailing valuation cross-check. It is not a personal required return, investor hurdle or investment verdict.
+
+Do not calculate CAPM, Beta, Cost of Equity or WACC.
+
+Show the formula's implied multiple at:
+
+$$
+r - 200\text{ bps}, \quad r, \quad r + 200\text{ bps}
+$$
+
+Ensure $r > g$, and explain the economic validity of the RONIC assumption.
+
+If the selected Base exit multiple deviates by more than 20% from the theoretical cross-check, explicitly justify the difference.
+
+### Offline fallback
+
+If live peer data is unavailable and peer multiples have not been supplied:
+
+- Mark Anchor 1 as `"not provided — offline fallback active."`
+- Use Anchor 2 when historical data is available.
+- Use the trailing formula as an economic sanity check.
+- Explicitly flag the absence of peer triangulation.
+
+Never invent peer multiples or historical valuation bands.
+
+## 3.10 Fundamental scenario sanity checks
+
+For each scenario, assess:
+
+**Mauboussin base-rate check**
+
+Compare projected revenue growth and operating margins with historical reference-class distributions for companies of similar scale and maturity.
+
+Justify assumptions in the top decile of historical outcomes.
+
+**Greenwald moat and margin durability**
+
+Assess customer captivity, switching costs, scale economies, intellectual property, network effects and regulatory licenses.
+
+Explain whether projected margins can persist without competitive erosion.
+
+**Physics versus sentiment**
+
+Separate business performance from valuation multiple changes.
+
+The Bear exit multiple must price operating stagnation, not existential catastrophe risk.
+
+## 3.11 Physics-versus-sentiment $3 \times 3$ cross-grid
+
+Build a complete $3 \times 3$ table.
+
+| Year 5 NOPAT | Bear Exit Multiple | Base Exit Multiple | Bull Exit Multiple |
+| :--- | ---: | ---: | ---: |
+| Bear NOPAT | USD IRR | USD IRR | USD IRR |
+| Base NOPAT | USD IRR | USD IRR | USD IRR |
+| Bull NOPAT | USD IRR | USD IRR | USD IRR |
+
+For every cell use:
+
+- Stated row NOPAT.
+- Stated column exit multiple.
+- Corresponding scenario cash and debt balances.
+- Consistent NCI and preferred shares.
+- Consistent diluted share-count method.
+- Corresponding one-pass buyback calculation.
+- Identical valuation-date FX assumptions.
+- Relevant dividend cash flows.
+
+Recalculate every cell; do not interpolate.
+
+The center cell `(Base NOPAT, Base Multiple)` must match the Phase 3 Base Case USD IRR exactly.
+
+Quote the Base Case valuation and return range directly from this cross-grid.
+
+## 3.12 USD currency treatment
+
+Use the valuation-date spot FX rate consistently across all five years.
+
+No home-currency calculation, future FX scenario or separate FX sensitivity strip is required.
+
+The entire valuation is expressed in USD.
+
+---
+
+# Phase 4: Catastrophe Risk, Scenario Probabilities & Expected Return
+
+## 4.1 Four-state probability model
+
+Model four mutually exclusive states:
+
+1. Catastrophe.
+2. Bear.
+3. Base.
+4. Bull.
+
+Probabilities must sum to 100%.
+
+Bear, Base and Bull operating multiples are conditional on survival. The four probabilities represent the complete unconditional outcome distribution.
+
+Derive probabilities from concrete evidence, including:
+
+- Audit quality.
+- Legal ownership and listing structure.
+- Financial leverage.
+- Interest coverage.
+- Regulatory and sanctions exposure.
+- Customer concentration.
+- Cash accessibility.
+- Insolvency risk.
+- Governance and control rights.
+
+Never assign unsupported default probability estimates.
+
+### Evidence-gated probability bounds
+
+A Catastrophe probability of 2% or less is permissible only when structural triggers are absent, including:
+
+- Clean audit opinion.
+- Developed-market direct equity ownership.
+- Interest coverage above 3x.
+- No acute regulatory or sanctions exposure.
+
+VIE structure, high leverage, audit qualifications, acute regulatory concentration and other structural risk factors require higher evidence-supported probabilities.
+
+Cyclical, rate-sensitive or leveraged businesses must receive a meaningful Bear probability, normally at least 20–25%.
+
+Explain the evidence behind all four probabilities.
+
+## 4.2 Catastrophe event timing and recovery
+
+State an explicit assumed event year $t_{\text{cat}}$, for example Year 2 or Year 3.
+
+Use the projected balance sheet at that exact event year, not the Year 5 balance sheet.
+
+Calculate:
+
+$$
+\text{Catastrophe Equity Value}_{t_{\text{cat}}} = \max\left(0,\ \text{Gross Offshore Unrestricted Cash}_{t_{\text{cat}}} \times \text{Recovery \%} + \text{Recoverable NonDomestic Assets}_{t_{\text{cat}}} - \text{Senior Claims}_{t_{\text{cat}}}\right)
+$$
+
+Use gross offshore unrestricted cash.
+
+Do not first deduct debt from cash and then deduct it again as a senior claim.
+
+Recoverable non-domestic assets must exclude cash already included separately.
+
+Senior claims include applicable debt, NCI, preferred shares and other documented senior claims.
+
+Calculate actual recovery from the available evidence and explicit assumptions.
+
+Do not assume automatic 100% equity loss.
+
+Distinguish partial impairment from total loss.
+
+For foreign-listed companies, identify whether offshore cash and non-domestic assets are legally accessible to security holders under the catastrophe scenario.
+
+## 4.3 Catastrophe cash-flow timing
+
+For the Catastrophe scenario:
+
+- Include net dividends actually collected before the event.
+- Include terminal recovery at the exact event year.
+- Show zero cash flows thereafter.
+- Convert every cash flow to USD using valuation-date spot FX.
+
+The catastrophe recovery must be based on the projected balance sheet at the event year.
+
+## 4.4 Unified dated-cash-flow IRR
+
+For each survival scenario:
+
+$$
+CF_0 = -\text{USD Entry Price}
+$$
+
+$$
+CF_{1\text{--}4} = \text{USD Annual Net Dividends}
+$$
+
+$$
+CF_5 = \text{USD Year 5 Terminal Value} + \text{USD Year 5 Net Dividend}
+$$
+
+For Catastrophe, place recovery at $t_{\text{cat}}$ after prior dividends, with zero subsequent cash flows.
+
+Calculate true dated-cash-flow IRR for each scenario.
+
+Net dividends must deduct:
+
+- Dividend withholding tax.
+- ADR depositary fees.
+- Custody fees.
+
+When dividends are zero, the survival-case calculation simplifies to:
+
+$$
+\text{IRR} = \text{MOIC}^{1/5} - 1
+$$
+
+Do not use this simplification when intermediate cash flows exist.
+
+All cash flows and returns are USD-denominated.
+
+## 4.5 Scenario return table
+
+| Scenario | Probability | Year 5 NOPAT | Exit Multiple | Terminal/Recovery Value per Share (USD) | MOIC | Total Return | IRR |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Catastrophe | | — | — | Recovery at $t_{\text{cat}}$ | | | |
+| Bear | | | | | | | |
+| Base | | | | | | | |
+| Bull | | | | | | | |
+
+For Catastrophe, total proceeds include prior net dividends and event-year recovery.
+
+Report MOIC as cumulative USD proceeds divided by original USD entry capital.
+
+Report the actual realization horizon. MOIC describes cumulative proceeds, while IRR accounts for the timing of those proceeds.
+
+## 4.6 Probability-weighted Expected IRR
+
+Do not calculate Expected IRR by taking the weighted average of individual scenario IRRs.
+
+Construct the annual probability-weighted USD cash-flow vector:
+
+$$
+CF_0 = -\text{USD Entry Price}
+$$
+
+$$
+CF_t = \sum_i p_i CF_{i,t}, \quad t = 1, \ldots, 5
+$$
+
+Then:
+
+$$
+\text{Expected IRR} = \text{IRR}(CF_0, CF_1, \ldots, CF_5)
+$$
+
+Catastrophe recovery is placed at the actual event year.
+
+Survival terminal values are placed in Year 5.
+
+This is the required probability-weighted Expected IRR calculation.
+
+Also calculate:
+
+$$
+\text{Expected MOIC} = \sum_i p_i \text{MOIC}_i
+$$
+
+Label this as probability-weighted cumulative nominal proceeds. Since different states may have different realization dates, do not interpret this as a common-horizon annualized return.
+
+## 4.7 Base-probability sensitivity
+
+Recalculate Expected IRR under:
+
+- Base probability reduced by 10 percentage points.
+- Original probability distribution.
+- Base probability increased by 10 percentage points.
+
+Reallocate the probability difference proportionally between Bear and Catastrophe, keeping Bull unchanged and ensuring that all probabilities remain non-negative and sum to 100%.
+
+Show the revised probabilities and recalculated Expected IRRs.
+
+Do not apply a personal return threshold or verdict.
+
+## 4.8 Full return distribution
+
+Report:
+
+**Base Case valuation and return range**
+
+Use the $3 \times 3$ cross-grid to provide a realistic range around the Base Case point estimate.
+
+**Median outcome**
+
+Order the four scenarios from lowest to highest MOIC.
+
+Identify the exact scenario where cumulative probability crosses 50%.
+
+**Probability of capital loss**
+
+$$
+P(\text{Capital Loss}) = \sum_{i: \text{MOIC}_i < 1} p_i
+$$
+
+**5th-percentile outcome**
+
+Order scenarios by MOIC and identify the scenario where cumulative probability first crosses 5%.
+
+**Expected value versus median**
+
+Explain the difference between the probability-weighted expected outcome and the median scenario.
+
+Do not confuse expected return with the most likely outcome.
+
+---
+
+# Phase 5: Quantitative Return Assessment & Thesis-Killers
+
+This phase consolidates the numerical investment economics. It does not introduce portfolio-management decisions.
+
+## 5.1 Asymmetry ratio
+
+Calculate across all four states:
+
+$$
+\text{Expected Gain} = \sum_i p_i \max(\text{MOIC}_i - 1, 0)
+$$
+
+$$
+\text{Expected Loss} = \sum_i p_i \max(1 - \text{MOIC}_i, 0)
+$$
+
+$$
+\text{Asymmetry Ratio} = \frac{\text{Expected Gain}}{\text{Expected Loss}}
+$$
+
+If Expected Loss is zero, report `"No modeled capital-loss state."`
+
+Use the same scenario MOIC definitions as Phase 4.
+
+## 5.2 Consolidated numerical results
+
+Report:
+
+- Current security price in original trading currency.
+- Current security price in USD.
+- Current spot FX rates.
+- Base Case intrinsic value per share/ADS in USD.
+- Bear, Base and Bull terminal values in USD.
+- Catastrophe recovery value in USD.
+- All four scenario probabilities.
+- All four scenario MOICs.
+- All four scenario IRRs.
+- Probability-weighted Expected MOIC.
+- Probability-weighted Expected IRR.
+- Probability of capital loss.
+- Median outcome.
+- 5th-percentile outcome.
+- Asymmetry ratio.
+- Base-probability sensitivity.
+
+The final conclusion should describe the numerical return distribution and identify the key assumptions responsible for the valuation.
+
+Do not introduce personal hurdle rates, buy/sell verdicts, passive-index comparisons, opportunity-cost comparisons or portfolio recommendations.
+
+## 5.3 Three concrete thesis-killers
+
+Identify three measurable operating or financial developments that would invalidate the valuation assumptions.
+
+Examples:
+
+- Cash conversion deteriorating below a specified level.
+- Clean EBIT margin falling below a specified level.
+- Executed buybacks materially diverging from the modeled pace.
+- Revenue growth falling below modeled assumptions.
+- Debt or interest coverage deteriorating beyond the modeled range.
+
+Use company-specific quarterly KPIs and explicit numerical thresholds.
+
+Do not invent arbitrary thresholds. Anchor them to historical performance, operating economics or the forecast assumptions.
+
+---
+
+# Phase 6: Mandatory Mathematical & Consistency Audit
+
+Before finalizing, verify every calculation.
+
+| Audit Check | Status | Evidence / Line Check |
 | :--- | :---: | :--- |
-| 1. No CAPM, Beta, or WACC used anywhere; trailing cross-check uses $r \neq H$ and shows $r \pm 200\text{ bps}$ | | |
-| 2. ADS / share-class ratio stated; Year 5 share count is **Diluted** (or basic explicitly justified) on one tradable unit | | |
-| 3. Invested Capital uses Parent Stockholders' Equity (no double-count of consolidated NCI) | | |
-| 4. Cash haircut applied only to positive cash; shortfall, debt, NCI & preferred at 100% | | |
-| 5. Leases treated symmetrically across EBIT, Invested Capital, and Debt | | |
-| 6. SBC convention matches Phase 1 Owner Earnings, Phase 3 shares & peers; Phase 2 yield labeled diagnostic | | |
-| 7. Sales-to-Capital ratio anchored to Phase 1 `[Filing]` data; reinvestment $\ge 0$ | | |
-| 8. Buyback pace capped at Phase 2 executed history (or catalyst justified); 1-pass price used | | |
-| 9. Exit multiple follows Anchor 1 → Anchor 2 → Formula precedence; >20% deviation from formula explicitly justified; Bear excludes tail risk | | |
-| 10. **All 9 cells** of $3 \times 3$ cross-grid reconcile arithmetically; center cell matches Base Case IRR and quoted Base range matches grid | | |
-| 11. Catastrophe uses gross offshore cash at explicit $t_{\text{cat}}$; probability bounds & $\pm 10\text{ pp}$ test shown | | |
-| 12. Probabilities sum to 100%; Expected IRR uses annual home-CCY cash-flow vector; FX strip & input tags complete | | |
-| 13. Executive Return Summary table & `valuation-summary-json` tag reconcile **exactly** with Phase 4/5 outputs | | |
+| 1. No CAPM, Beta, WACC or Cost of Equity used; trailing cross-check uses independently justified $r$ and displays $r \pm 200$ bps | PASS/FAIL | |
+| 2. No personal hurdle, portfolio constraints, concentration limits, position sizing or Quarter-Kelly calculations included | PASS/FAIL | |
+| 3. ADS/share-class ratio explicitly stated; diluted Year 5 shares use one tradable unit | PASS/FAIL | |
+| 4. All financial statements and security prices translated into USD using valuation-date spot FX | PASS/FAIL | |
+| 5. Historical reported USD translations and old document FX rates are not mixed into the analytical USD conversion | PASS/FAIL | |
+| 6. Invested Capital uses Parent Stockholders' Equity without double-counting NCI | PASS/FAIL | |
+| 7. Cash haircut applies only to positive excess cash; shortfalls, debt, NCI and preferred shares are deducted at 100% | PASS/FAIL | |
+| 8. Lease treatment is consistent across EBIT, Invested Capital and Debt | PASS/FAIL | |
+| 9. SBC convention matches Phase 1 owner earnings, Phase 3 diluted shares and peer multiples | PASS/FAIL | |
+| 10. Sales-to-Capital is filing-anchored; reinvestment is non-negative unless explicitly documented otherwise | PASS/FAIL | |
+| 11. Buybacks are capped at executed historical pace and use the one-pass price calculation | PASS/FAIL | |
+| 12. Exit multiple follows Anchor 1 → Anchor 2 → Formula; deviations above 20% are explained | PASS/FAIL | |
+| 13. All nine $3 \times 3$ cross-grid cells reconcile; center cell equals the Base Case IRR | PASS/FAIL | |
+| 14. Catastrophe uses gross offshore cash at an explicit event year and deducts senior claims exactly once | PASS/FAIL | |
+| 15. Probabilities sum to 100%; probability sensitivity and distribution statistics reconcile | PASS/FAIL | |
+| 16. Expected IRR uses the weighted dated USD cash-flow vector, not weighted scenario IRRs | PASS/FAIL | |
+| 17. Executive Summary, Phase 3, Phase 4, Phase 5 and `valuation-summary-json` reconcile exactly | PASS/FAIL | |
 
-## Optional Module: Cross-Border / Emerging Market / VIE Risk
+If any check fails, correct the calculation before presenting the valuation conclusion.
 
-*(Activate this section ONLY when analyzing foreign-listed equities, ADRs, or emerging-market/China structures.)*
+## valuation-summary-json
 
-* **Legal Structure & Cash Repatriation:** Verify direct equity vs. VIE contractual structure. Distinguish onshore restricted cash from offshore unrestricted cash available for dividends/buybacks, and explicitly deduct repatriation withholding taxes (e.g., onshore-to-offshore dividend withholding tax) when sizing distributable cash or Catastrophe recovery value.
+Conclude at the very end of the report with a single-line HTML comment containing a valid JSON object using **these exact keys** (numeric values without `%` or `$` signs), reconciling exactly with the audited tables:
 
-* **Listing, Custody & Conversion Mechanics:** Factor annual ADR depositary fees and dividend withholding taxes directly into Phase 3 net dividends; document fungibility into Hong Kong or local ordinary shares to inform Phase 4's Catastrophe recovery build.
+`<!-- valuation-summary-json {"valuation_date":"YYYY-MM-DD","ticker":"TICKER","company_name":"Name","share_class_ads_ratio":"1 ADS = N ordinary shares","reporting_currency":"CNY","trading_currency":"USD","reporting_to_usd_fx":1.0,"trading_to_usd_fx":1.0,"current_price_original":0.0,"current_price_usd":0.0,"diluted_shares_m":0.0,"target_year":2031,"base_price_usd":0.0,"bear_price_usd":0.0,"bull_price_usd":0.0,"catastrophe_recovery_usd":0.0,"catastrophe_year":2029,"prob_catastrophe_pct":0.0,"prob_bear_pct":0.0,"prob_base_pct":0.0,"prob_bull_pct":0.0,"catastrophe_moic":0.0,"bear_moic":0.0,"base_moic":0.0,"bull_moic":0.0,"expected_moic":0.0,"catastrophe_total_return_pct":0.0,"bear_total_return_pct":0.0,"base_total_return_pct":0.0,"bull_total_return_pct":0.0,"expected_total_return_pct":0.0,"catastrophe_irr_pct":0.0,"bear_irr_pct":0.0,"base_irr_pct":0.0,"bull_irr_pct":0.0,"expected_irr_pct":0.0,"prob_capital_loss_pct":0.0,"median_outcome":"Base","fifth_percentile_outcome":"Catastrophe","asymmetry_ratio":0.0,"base_prob_minus10_irr_pct":0.0,"base_prob_plus10_irr_pct":0.0} -->`
 
-* **Tail-Risk Isolation:** Channel VIE invalidation, forced unconvertible delisting, or capital-control expropriation strictly into Phase 4's Catastrophe state—never into Phase 3's survival multiples.
+---
 
-## Execution Instructions
+# Optional Module: Cross-Border, Emerging-Market and VIE Risk
 
-* Use **exact numbers** from the provided financial statements; cite line items and tag every input `[Filing: ...]`, `[Market Data: Source, Date]`, or `[Assumption]`. State `"not provided"` rather than guessing, and follow Rule 7's Offline Fallback whenever live market data is unavailable.
+Activate only for foreign-listed companies, ADRs, emerging markets or structures with material cross-border ownership risk.
 
-* Show all math transparently so every assumption can be challenged.
+## Legal structure and cash repatriation
 
-* Complete the **Phase 6 Consistency Audit** at the end of every valuation.
+Verify whether investors own direct equity or VIE contractual claims.
 
-* Do NOT hedge with generic financial disclaimers or revert to CAPM/WACC jargon. Be candid, quantitative, and clear about uncertainty via ranges, the $3 \times 3$ cross-grid, and the FX sensitivity strip.
+Separate onshore restricted cash from offshore unrestricted cash.
+
+Identify cash actually available to foreign shareholders.
+
+Deduct applicable repatriation and withholding taxes when projecting distributable cash or recovery value.
+
+Translate all relevant amounts into USD using valuation-date spot FX.
+
+## Listing, custody and conversion
+
+Document:
+
+- ADR depositary fees.
+- Dividend withholding taxes.
+- Ordinary-share/ADS conversion ratio.
+- Fungibility into Hong Kong or local ordinary shares.
+- Custody and conversion restrictions.
+
+Factor applicable fees and withholding taxes directly into investor cash flows.
+
+## Tail-risk isolation
+
+VIE invalidation, forced unconvertible delisting, capital-control expropriation and similar existential risks belong exclusively in Phase 4's Catastrophe state.
+
+Never embed these risks in the survival exit multiples.
+
+---
+
+# Data Quality, Source Rules & Offline Fallback
+
+Every numerical input must be labeled:
+
+- `[Filing: Document, Period, Line Item]`
+- `[Market Data: Source, Date]`
+- `[Assumption]`
+
+Show derived calculations and the exact underlying source figures.
+
+Use USD throughout all analytical calculations.
+
+Never invent missing figures.
+
+Write `"not provided"` whenever required data is absent.
+
+## Missing current price
+
+Check attached materials for a recent stock price.
+
+If no current price is available in the attachments, obtain the latest available market price where live data access is available.
+
+If no live market access is available and no recent price has been supplied, stop before the return calculations and request the missing price.
+
+## Missing FX
+
+Obtain the latest available spot rate for every currency that needs conversion into USD.
+
+If a required FX rate cannot be obtained, mark it `"not provided"` and stop the affected valuation and return calculations rather than inventing an exchange rate.
+
+## Missing peer multiples
+
+Use the explicit offline fallback in Phase 3.
+
+Do not invent peer multiples, historical valuation multiples or market data.
+
+## Missing financial figures
+
+Write `"not provided"` rather than estimating or manufacturing missing filing data.
+
+Any necessary forward-looking estimate must be identified explicitly as an `[Assumption]`, not presented as a reported historical fact.
+
+## Final governing principle
+
+**Value the operating business using normalized fundamentals. Value the equity using a complete and consistent balance-sheet bridge. Calculate the potential investment return from today's market price using explicit operating scenarios, survival exit multiples, current USD conversion rates and evidence-based probabilities.**
+
+The purpose is to establish the intrinsic value of the stock and the realistic probability-weighted distribution of its USD returns.

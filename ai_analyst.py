@@ -59,43 +59,44 @@ SYSTEM_PROMPT_BASE = (
 SYSTEM_PROMPT_VALUATION = (
     "You are an institutional, fundamental long-term equity analyst in the tradition of "
     "Warren Buffett, Bruce Greenwald, and Michael Mauboussin. "
-    "Execute the user's attached Scientific 5-Year Equity Return & Valuation Protocol rigorously "
-    "using the attached financial dossier (SEC filings, earnings transcripts, CompanyBrief.md, Peers.md). "
+    "Execute the user's attached Scientific 5-Year Equity Valuation & Probability-Weighted Return Protocol rigorously "
+    "using the attached financial dossier (ValuationPack.md, Peers.md, CompanyBrief.md, SEC filings, earnings transcripts). "
     "STRICTLY obey all mathematical and data-hygiene rules in the protocol: "
-    "NEVER use CAPM, Beta, or WACC (ignore any WACC/Beta figures if a reference file mentions them). "
-    "Tag every numerical input as `[Filing: Document, Period, Line Item]`, `[Market Data: Source, Date]`, "
+    "1) NEVER use CAPM, Beta, WACC, or Cost of Equity (ignore any WACC/Beta figures if a reference file mentions them). "
+    "2) NEVER include personal hurdle rates, buy/sell verdicts based on arbitrary return thresholds, passive-index comparisons, "
+    "portfolio constraints, concentration caps, position sizing, or Quarter-Kelly calculations. "
+    "3) Use USD exclusively at constant valuation-date spot FX for all comparisons, projections, cash flows, and returns; "
+    "do not invent a single expected terminal share price across scenarios with different realization dates. "
+    "4) Tag every numerical input as `[Filing: Document, Period, Line Item]`, `[Market Data: Source, Date]`, "
     "or `[Assumption]`, or write `\"not provided\"` rather than inventing missing figures. "
-    "Begin your response with a single-line HTML comment JSON summary (exact keys, numeric values without % signs) "
-    "followed immediately by the plain-English Executive Return Summary (At a Glance) table showing Total % Return "
-    "by target year and what $10,000 becomes:\n"
-    "<!-- valuation-summary-json {\"currency\":\"USD\",\"current_price\":0.0,\"target_year\":2031,"
-    "\"expected_price\":0.0,\"expected_total_return_pct\":0.0,\"expected_irr_pct\":0.0,"
-    "\"base_price\":0.0,\"base_total_return_pct\":0.0,\"bear_total_return_pct\":0.0,"
-    "\"bull_total_return_pct\":0.0,\"catastrophe_total_return_pct\":0.0,"
-    "\"max_weight_pct\":0.0,\"verdict\":\"CLEARS\"} -->\n"
-    "Show all math transparently, complete the Phase 6 Mandatory Self-Audit table at the end, "
-    "and do NOT hedge with generic financial disclaimers."
+    "5) Begin immediately with the Executive Return Summary (Headline + Scenario Return Table showing MOIC, Total Return %, "
+    "Annualized IRR %, and $10,000 Cumulative Proceeds), complete Phases 1–6 including all 17 audit checks, and conclude "
+    "at the VERY END of the response with the single-line `<!-- valuation-summary-json {...} -->` HTML comment using the exact keys "
+    "specified in Phase 6 so every number reconciles with the audited tables. "
+    "Do NOT hedge with generic financial disclaimers."
 )
 
 SYSTEM_PROMPT_VALUATION_CHAT = (
     "You are an institutional, fundamental long-term equity analyst in the tradition of "
     "Warren Buffett, Bruce Greenwald, and Michael Mauboussin. "
-    "Continue discussing and refining the company's CAPM/WACC-free 5-year hurdle-rate valuation "
+    "Continue discussing and refining the company's USD-based, CAPM/WACC-free 5-year intrinsic valuation "
     "grounded strictly in the attached dossier. "
-    "NEVER use CAPM, Beta, or WACC. Tag every numerical input (`[Filing: ...]`, `[Market Data: ...]`, "
-    "`[Assumption]`), show math transparently, and respond directly to the user's question without "
-    "repeating the full 6-phase report or emitting a JSON summary tag unless explicitly requested."
+    "NEVER use CAPM, Beta, or WACC, and do not introduce personal hurdle rates or portfolio position sizing. "
+    "Tag every numerical input (`[Filing: ...]`, `[Market Data: ...]`, `[Assumption]`), show math transparently, "
+    "and respond directly to the user's question without repeating the full 6-phase report or emitting a JSON summary tag "
+    "unless explicitly requested."
 )
 
 _VALUATION_SUMMARY_RE = re.compile(
-    r"<!--\s*valuation-summary-json\s*(\{.*?\})\s*-->[ \t]*\r?\n*",
+    r"(?:\r?\n)*<!--\s*valuation-summary-json\s*(\{.*?\})\s*-->[ \t]*(?:\r?\n)*",
     re.DOTALL,
 )
 _REQUIRED_SUMMARY_NUMERIC_KEYS = (
-    "current_price",
-    "expected_total_return_pct",
+    "current_price_usd",
+    "base_price_usd",
+    "expected_moic",
     "expected_irr_pct",
-    "max_weight_pct",
+    "prob_capital_loss_pct",
 )
 
 
@@ -117,9 +118,6 @@ def extract_valuation_summary(markdown_text: str) -> Optional[Dict[str, Any]]:
     if not isinstance(data, dict):
         return None
 
-    verdict = data.get("verdict")
-    if not isinstance(verdict, str) or not verdict.strip():
-        return None
     for k in _REQUIRED_SUMMARY_NUMERIC_KEYS:
         if k not in data or data[k] is None or isinstance(data[k], bool):
             return None
@@ -127,64 +125,67 @@ def extract_valuation_summary(markdown_text: str) -> Optional[Dict[str, Any]]:
             val = float(data[k])
         except (TypeError, ValueError):
             return None
-        if k == "current_price" and val <= 0:
+        if k == "current_price_usd" and val <= 0:
             return None
+        if k == "expected_moic" and val < 0:
+            return None
+        if k == "prob_capital_loss_pct" and not (0.0 <= val <= 100.0):
+            return None
+
+    # Derive expected_total_return_pct from expected_moic if omitted
+    if "expected_total_return_pct" not in data or data["expected_total_return_pct"] is None:
+        data["expected_total_return_pct"] = round((float(data["expected_moic"]) - 1.0) * 100.0, 1)
     return data
 
 
 def strip_valuation_summary_tag(markdown_text: str) -> str:
-    """Remove the hidden `valuation-summary-json` comment and any trailing blank lines."""
+    """Remove the hidden `valuation-summary-json` comment cleanly from anywhere in the memo."""
     if not markdown_text:
         return markdown_text
-    return _VALUATION_SUMMARY_RE.sub("", markdown_text, count=1).lstrip("\r\n")
+    return _VALUATION_SUMMARY_RE.sub("\n\n", markdown_text, count=1).strip()
 
 
 @dataclass
 class ValuationParameters:
-    """Configurable investor parameters passed dynamically to the custom valuation protocol."""
+    """Security-level parameters passed dynamically to the USD valuation protocol (no personal portfolio rules)."""
 
-    hurdle_rate_pct: float = 15.0
-    home_currency: str = "USD"
     spot_price: str = ""
     spot_fx_rate: str = ""
     dividend_withholding_tax_pct: float = 10.0
     adr_custody_fee: str = "0.00"
-    exit_cgt_pct: float = 0.0
-    max_impairment_pct: float = 2.5
-    single_stock_cap_pct: float = 15.0
     activate_cross_border_module: bool = False
     custom_notes: str = ""
 
     def to_prompt_block(self) -> str:
-        """Render active investor parameters as an explicit override block for DeepSeek."""
-        cgt_line = (
-            f"{self.exit_cgt_pct:.2f}% (deduct personal exit capital-gains tax at Year 5)"
-            if self.exit_cgt_pct > 0
-            else "0% (pre-capital-gains tax — default)"
+        """Render active security-level parameters as an explicit override block for DeepSeek."""
+        price_line = (
+            self.spot_price.strip()
+            if self.spot_price.strip()
+            else "Use latest dated USD price in ValuationPack.md (or halt per Missing Current Price rule if absent)"
         )
-        price_line = self.spot_price.strip() if self.spot_price.strip() else "Use latest dated price in attached dossier (or halt per Rule 7 if absent)"
-        fx_line = self.spot_fx_rate.strip() if self.spot_fx_rate.strip() else "Use latest dated FX rate in attached dossier (or 1.00 if reporting currency == home currency; halt per Rule 7 if cross-currency FX is absent)"
+        fx_line = (
+            self.spot_fx_rate.strip()
+            if self.spot_fx_rate.strip()
+            else "Use latest dated Reporting->USD spot FX rate in ValuationPack.md (1.00 if reporting in USD)"
+        )
         cross_border_line = (
-            "ACTIVE — include the full Cross-Border / Emerging Market / VIE Risk module."
+            "ACTIVE — include the full Optional Module: Cross-Border, Emerging-Market and VIE Risk."
             if self.activate_cross_border_module
-            else "INACTIVE (activate only if filings reveal a foreign/ADR/VIE structure)."
+            else "INACTIVE (activate only if filings reveal a foreign-listed/ADR/VIE structure)."
         )
         lines = [
-            "## Active Investor Parameters & Run Overrides",
-            f"- **Target Hurdle Rate ($H$):** {self.hurdle_rate_pct:.2f}% nominal annual IRR (home currency, net of dividend WHT & ADR/custody fees)",
-            f"- **Investor Home Currency:** `{self.home_currency.strip().upper() or 'USD'}`",
+            "## Active Security Parameters & Run Overrides (Universal USD Policy)",
+            "- **Analytical Currency:** `USD` exclusively at constant valuation-date spot FX",
             f"- **Current Share/ADS Price Override:** {price_line}",
-            f"- **Spot FX Rate Override:** {fx_line}",
-            f"- **Dividend Withholding Tax:** {self.dividend_withholding_tax_pct:.2f}%",
-            f"- **Annual ADR / Custody Fee (per share, Home CCY):** {self.adr_custody_fee.strip() or '0.00'}",
-            f"- **Personal Exit Capital-Gains Tax:** {cgt_line}",
-            f"- **Portfolio Risk Budget:** Worst-state portfolio impairment cap = {self.max_impairment_pct:.2f}%; Single-Stock Concentration Cap = {self.single_stock_cap_pct:.2f}%",
+            f"- **Valuation-Date Spot FX Override:** {fx_line}",
+            f"- **Dividend Withholding Tax (Security-Level):** {self.dividend_withholding_tax_pct:.2f}%",
+            f"- **Annual ADR / Depositary / Custody Fee (USD/share):** {self.adr_custody_fee.strip() or '0.00'}",
             f"- **Optional Cross-Border / EM / VIE Module:** {cross_border_line}",
         ]
         if self.custom_notes.strip():
             lines.extend([
                 "",
-                "### Additional Analyst Overrides / Live Market Inputs",
+                "### Additional Analyst Notes / Overrides",
                 self.custom_notes.strip(),
             ])
         return "\n".join(lines)
@@ -196,7 +197,7 @@ def load_valuation_protocol(path: Path = VALUATION_PROTOCOL_PATH) -> str:
         return path.read_text(encoding="utf-8")
     return (
         "# Custom Valuation Protocol\n\n"
-        "valuation_protocol.md was not found. Perform a CAPM/WACC-free 5-year IRR valuation "
+        "valuation_protocol.md was not found. Perform a USD-based, CAPM/WACC-free 5-year intrinsic valuation "
         "grounded strictly in the attached financial filings."
     )
 
@@ -214,7 +215,7 @@ def build_scientific_valuation_prompt(
     protocol_text: Optional[str] = None,
     params: Optional[ValuationParameters] = None,
 ) -> str:
-    """Assemble the complete user prompt combining active investor parameters + valuation protocol."""
+    """Assemble the complete user prompt combining security-level parameters + valuation protocol."""
     proto = protocol_text.strip() if protocol_text and protocol_text.strip() else load_valuation_protocol()
     p = params or ValuationParameters()
     return (
@@ -227,8 +228,8 @@ def build_scientific_valuation_prompt(
 
 ANALYSIS_WORKFLOWS: Dict[str, Dict[str, Any]] = {
     "scientific_valuation": {
-        "label": "🧮 5-Year Hurdle-Rate Valuation (Custom Protocol)",
-        "short_desc": "Run your editable CAPM/WACC-free 6-phase IRR & Quarter-Kelly protocol over SEC filings & transcripts.",
+        "label": "🧮 5-Year Intrinsic Valuation & Return Model (USD)",
+        "short_desc": "Run your editable USD-based, CAPM/WACC-free 6-phase probability-weighted return protocol.",
         "max_tokens": 65536,
         "temperature": 0.0,
         "system_prompt": SYSTEM_PROMPT_VALUATION,
@@ -738,3 +739,81 @@ def run_workflow_analysis(
         estimated_cost_usd=cost,
         saved_path=saved_path,
     )
+
+
+def discover_peer_tickers(
+    ticker: str,
+    api_key: str,
+    company_name: str = "",
+    sector: str = "",
+    industry: str = "",
+    country: str = "",
+    business_summary: str = "",
+    model: str = DEFAULT_MODEL,
+    max_peers: int = 5,
+    session: Optional[requests.Session] = None,
+) -> List[str]:
+    """Ask DeepSeek to identify publicly traded comparable peer tickers for Anchor 1 benchmarking.
+
+    Only ticker symbols are requested from the LLM; all live peer multiples and dates are
+    fetched deterministically from `defeatbeta-api`.
+    """
+    if not api_key or not api_key.strip():
+        return []
+
+    clean = sanitize_ticker(ticker)
+    prompt = (
+        f"Identify {max_peers} publicly traded comparable competitor tickers for {clean}"
+        f"{f' ({company_name})' if company_name else ''}.\n"
+        f"Sector/Industry tag: {sector or 'n/a'} / {industry or 'n/a'} | Country: {country or 'n/a'}\n"
+        f"Business description: {(business_summary or 'n/a')[:900]}\n\n"
+        "Rules:\n"
+        "1. Pick true economic competitors based on the business description (ignore misclassified industry tags).\n"
+        "2. Prefer US-listed equities / ADRs (NYSE/NASDAQ tickers) so live financial statements are available.\n"
+        f"3. Exclude {clean} itself and any delisted/private companies.\n"
+        "4. Return ONLY a raw JSON array of ticker strings, e.g. [\"WDH\", \"HUIZ\", \"LMND\", \"SLQT\"]."
+    )
+    messages = [
+        {"role": "system", "content": "You return only a JSON array of valid publicly traded stock ticker symbols."},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        content, _usage = call_deepseek(
+            api_key=api_key,
+            messages=messages,
+            model=model,
+            temperature=0.0,
+            max_tokens=2048,
+            timeout=(15, 60),
+            session=session,
+        )
+    except Exception:
+        return []
+
+    m = re.search(r"\[[^\]]*\]", content, re.DOTALL)
+    if not m:
+        return []
+    try:
+        raw_list = json.loads(m.group(0))
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(raw_list, list):
+        return []
+
+    peers: List[str] = []
+    seen = {clean}
+    for item in raw_list:
+        if not isinstance(item, str):
+            continue
+        try:
+            sym = sanitize_ticker(item)
+        except ValueError:
+            continue
+        if sym not in seen:
+            seen.add(sym)
+            peers.append(sym)
+        if len(peers) >= max_peers:
+            break
+    return peers
+

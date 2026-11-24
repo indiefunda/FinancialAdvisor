@@ -16,6 +16,7 @@ from ai_analyst import (
     ValuationParameters,
     build_dossier_context,
     call_deepseek_full,
+    discover_peer_tickers,
     estimate_cost_usd,
     extract_valuation_summary,
     list_dossier_files,
@@ -37,6 +38,7 @@ from config_manager import (
 from fundamentals import (
     build_portfolio_preflight,
     create_quiet_ticker,
+    extract_company_profile,
     generate_company_brief,
     generate_peers_report,
     generate_sec_coverage_audit,
@@ -436,8 +438,27 @@ with tab_fund:
                             clean_t, ticker_obj=t_obj, on_status=lambda m: status.write(m)
                         )
                     if gen_peers:
+                        auto_peers = []
+                        ds_key_tab3 = api_keys.get("deepseek", "").strip()
+                        if ds_key_tab3:
+                            status.write(f"🔍 Searching comparable listed peers for {clean_t}...")
+                            prof = extract_company_profile(t_obj)
+                            auto_peers = discover_peer_tickers(
+                                ticker=clean_t,
+                                api_key=ds_key_tab3,
+                                company_name=prof.get("company_name", ""),
+                                sector=prof.get("sector", ""),
+                                industry=prof.get("industry", ""),
+                                country=prof.get("country", ""),
+                                business_summary=prof.get("business_summary", ""),
+                            )
+                            if auto_peers:
+                                status.write(f"🔍 Discovered peers: {', '.join(auto_peers)}")
                         peers_path = generate_peers_report(
-                            clean_t, ticker_obj=t_obj, on_status=lambda m: status.write(m)
+                            clean_t,
+                            ticker_obj=t_obj,
+                            peer_tickers=auto_peers,
+                            on_status=lambda m: status.write(m),
                         )
                     if gen_dcf:
                         val_res = generate_valuation_bundle(
@@ -550,7 +571,6 @@ with tab_ai:
             )
 
         if prep_btn:
-            prep_home_ccy = st.session_state.get("vp_home_ccy", "USD") or "USD"
             with st.status(f"Preparing Valuation Dataset for {ai_ticker}...", expanded=True) as prep_st:
                 t_holder: List[object] = [None]
 
@@ -559,25 +579,24 @@ with tab_ai:
                         t_holder[0] = create_quiet_ticker(ai_ticker)
                     return t_holder[0]
 
-                # 1. ValuationPack.md (Price, Spot FX, 8Q+4Y statements, 10Y multiple band)
+                # 1. ValuationPack.md (Price, Spot FX to USD, 8Q+4Y statements, 10Y multiple band)
                 if force_refresh_ds or not has_vpack:
                     try:
                         vp_res = generate_valuation_pack(
                             ai_ticker,
-                            home_currency=prep_home_ccy,
                             ticker_obj=_get_ticker_obj(),
                             on_status=lambda m: prep_st.write(m),
                         )
                         prep_st.write(
-                            f"✅ Saved `ValuationPack.md` (Price: {vp_res.latest_price or 'n/a'}, "
-                            f"FX {vp_res.currency}->{vp_res.home_currency}: {vp_res.fx_rate or 'n/a'})"
+                            f"✅ Saved `ValuationPack.md` (Price: USD {vp_res.latest_price or 'n/a'}, "
+                            f"FX {vp_res.currency}->USD: {vp_res.fx_rate or 'n/a'})"
                         )
                     except Exception as exc:
                         prep_st.warning(f"ValuationPack error: {exc}")
                 else:
                     prep_st.write("⏭️ `ValuationPack.md` already exists (skipped).")
 
-                # 2. CompanyBrief.md & Peers.md
+                # 2. CompanyBrief.md & Anchor 1 Named Peers.md (AI competitor discovery + live DefeatBeta multiples)
                 if force_refresh_ds or not has_brief:
                     try:
                         generate_company_brief(ai_ticker, ticker_obj=_get_ticker_obj(), on_status=lambda m: prep_st.write(m))
@@ -589,8 +608,28 @@ with tab_ai:
 
                 if force_refresh_ds or not has_peers:
                     try:
-                        generate_peers_report(ai_ticker, ticker_obj=_get_ticker_obj(), on_status=lambda m: prep_st.write(m))
-                        prep_st.write("✅ Saved `Peers.md`")
+                        discovered_peers: List[str] = []
+                        if deepseek_key:
+                            prep_st.write(f"🔍 AI searching comparable listed competitors for {ai_ticker}...")
+                            prof = extract_company_profile(_get_ticker_obj())
+                            discovered_peers = discover_peer_tickers(
+                                ticker=ai_ticker,
+                                api_key=deepseek_key,
+                                company_name=prof.get("company_name", ""),
+                                sector=prof.get("sector", ""),
+                                industry=prof.get("industry", ""),
+                                country=prof.get("country", ""),
+                                business_summary=prof.get("business_summary", ""),
+                            )
+                            if discovered_peers:
+                                prep_st.write(f"🔍 Found comparable peers: **{', '.join(discovered_peers)}** — pulling live DefeatBeta multiples...")
+                        generate_peers_report(
+                            ai_ticker,
+                            ticker_obj=_get_ticker_obj(),
+                            peer_tickers=discovered_peers,
+                            on_status=lambda m: prep_st.write(m),
+                        )
+                        prep_st.write("✅ Saved `Peers.md` (Anchor 1 Named Peers + Industry Context)")
                     except Exception as exc:
                         prep_st.warning(f"Peers error: {exc}")
                 else:
@@ -667,7 +706,7 @@ with tab_ai:
                 "Attach Local Files to DeepSeek Context (1M-token window)",
                 options=list(file_map.keys()),
                 default=default_selected,
-                help="Attaching ValuationPack.md + CompanyBrief.md + Peers.md + recent SEC filings (10-K/20-F/10-Q) + 4 transcripts gives DeepSeek everything needed for your 5-Year Hurdle-Rate Valuation.",
+                help="Attaching ValuationPack.md + CompanyBrief.md + Peers.md + 20-F/10-K + latest quarterly releases + 4 transcripts gives DeepSeek everything needed for your USD 5-Year Valuation Protocol.",
             )
             chosen_files = [file_map[lbl] for lbl in chosen_labels]
 
@@ -681,37 +720,31 @@ with tab_ai:
                 f"Est. off-peak cost: **${est_cost_miss:.4f}** (1st run) / **${est_cost_hit:.4f}** (cached follow-up)"
             )
 
-            # ── Custom Valuation Parameters & Editable Protocol ──────────────
+            # ── Security-Level Valuation Settings & Editable Protocol (USD-Only) ──
             has_foreign_filing = any(
                 ("20-F" in df.rel_label.upper() or "6-K" in df.rel_label.upper())
                 for df in dossier_files
             )
-            with st.expander("⚙️ 5-Year Hurdle-Rate Valuation Parameters & Editable Protocol", expanded=False):
+            with st.expander("⚙️ Valuation Settings & Editable Protocol (Universal USD)", expanded=False):
                 st.caption(
-                    f"Active protocol file: `{VALUATION_PROTOCOL_PATH.name}` — edit parameters per run or "
-                    "modify the full Markdown protocol below to evolve your methodology over time."
+                    f"Active protocol file: `{VALUATION_PROTOCOL_PATH.name}` — Universal USD model (no personal hurdle or portfolio sizing). "
+                    "Edit security-level settings or modify the full Markdown protocol below."
                 )
-                vp1, vp2, vp3 = st.columns(3)
+                vp1, vp2 = st.columns(2)
                 with vp1:
-                    hurdle_rate = st.number_input("Target Hurdle Rate H (%)", 1.0, 50.0, 15.0, 0.5, key="vp_hurdle")
-                    home_ccy = st.text_input("Investor Home Currency", value="USD", key="vp_home_ccy")
                     div_wht = st.number_input("Dividend Withholding Tax (%)", 0.0, 50.0, 10.0, 1.0, key="vp_wht")
+                    adr_fee = st.text_input("Annual ADR / Custody Fee (USD/sh)", value="0.00", key=f"vp_adr_{ai_ticker}")
                 with vp2:
                     spot_price_ov = st.text_input(
-                        "Current Price Override (optional)",
+                        "Current USD Price Override (optional)",
                         placeholder="Auto-pulled in ValuationPack.md or override here",
                         key=f"vp_price_{ai_ticker}",
                     )
                     spot_fx_ov = st.text_input(
-                        "Spot FX Rate Override (optional)",
+                        "Valuation-Date Spot FX Override (optional)",
                         placeholder="Auto-pulled in ValuationPack.md or override here",
                         key=f"vp_fx_{ai_ticker}",
                     )
-                    adr_fee = st.text_input("Annual ADR/Custody Fee (Home CCY/sh)", value="0.00", key=f"vp_adr_{ai_ticker}")
-                with vp3:
-                    exit_cgt = st.number_input("Exit Capital-Gains Tax (%)", 0.0, 50.0, 0.0, 1.0, key="vp_cgt")
-                    max_impair = st.number_input("Worst-State Portfolio Loss Cap (%)", 0.5, 25.0, 2.5, 0.5, key="vp_impair")
-                    single_cap = st.number_input("Single-Stock Concentration Cap (%)", 1.0, 50.0, 15.0, 1.0, key="vp_cap")
 
                 cross_border = st.checkbox(
                     "Activate Optional Cross-Border / Emerging Market / VIE Risk Module",
@@ -720,9 +753,9 @@ with tab_ai:
                     help="Auto-checked when 20-F or 6-K filings are detected in the dossier.",
                 )
                 custom_run_notes = st.text_area(
-                    "Per-Run Analyst Notes / Live Peer Multiples (optional)",
-                    placeholder="e.g. Peer median EV/NOPAT = 11.5x (Peers: X, Y, Z [Market Data: Koyfin, 2026-11-24]). Use GAAP SBC basis.",
-                    height=70,
+                    "Per-Run Analyst Notes / Overrides (optional)",
+                    placeholder="e.g. Use GAAP SBC basis; check Q3 guidance.",
+                    height=68,
                     key=f"vp_notes_{ai_ticker}",
                 )
 
@@ -743,15 +776,10 @@ with tab_ai:
                         st.error(f"Could not save protocol: {exc}")
 
             val_params = ValuationParameters(
-                hurdle_rate_pct=float(hurdle_rate),
-                home_currency=home_ccy,
                 spot_price=spot_price_ov,
                 spot_fx_rate=spot_fx_ov,
                 dividend_withholding_tax_pct=float(div_wht),
                 adr_custody_fee=adr_fee,
-                exit_cgt_pct=float(exit_cgt),
-                max_impairment_pct=float(max_impair),
-                single_stock_cap_pct=float(single_cap),
                 activate_cross_border_module=bool(cross_border),
                 custom_notes=custom_run_notes,
             )
@@ -845,52 +873,56 @@ with tab_ai:
                         ]
                         st.session_state[f"deepseek_chat_mode_{ai_ticker}"] = last_res.workflow_id
                         st.rerun()
+
                 def _render_val_cards(md_text: str) -> None:
                     summary = extract_valuation_summary(md_text)
                     if not summary:
                         return
                     try:
-                        ccy = str(summary.get("currency") or "USD").upper()
                         yr = summary.get("target_year") or "5Y"
-                        cur_p = float(summary.get("current_price", 0) or 0)
-                        exp_p = float(summary.get("expected_price", 0) or 0)
-                        exp_tot = float(summary.get("expected_total_return_pct", 0) or 0)
-                        exp_irr = float(summary.get("expected_irr_pct", 0) or 0)
-                        base_tot = float(summary.get("base_total_return_pct", 0) or 0)
-                        bear_tot = float(summary.get("bear_total_return_pct", 0) or 0)
-                        bull_tot = float(summary.get("bull_total_return_pct", 0) or 0)
-                        cat_tot = float(summary.get("catastrophe_total_return_pct", 0) or 0)
-                        max_w = float(summary.get("max_weight_pct", 0) or 0)
-                        verdict = str(summary.get("verdict") or "n/a").upper()
-                        ten_k_exp = 10_000 * (1.0 + exp_tot / 100.0)
-                    except (TypeError, ValueError):
+                        cur_p = float(summary["current_price_usd"])
+                        base_p = float(summary["base_price_usd"])
+                        exp_moic = float(summary["expected_moic"])
+                        exp_tot = float(summary.get("expected_total_return_pct", (exp_moic - 1.0) * 100.0))
+                        exp_irr = float(summary["expected_irr_pct"])
+                        base_moic = float(summary.get("base_moic") or (base_p / cur_p))
+                        base_tot = float(summary.get("base_total_return_pct", (base_moic - 1.0) * 100.0))
+                        bear_tot = float(summary.get("bear_total_return_pct", 0.0) or 0.0)
+                        bull_tot = float(summary.get("bull_total_return_pct", 0.0) or 0.0)
+                        prob_loss = float(summary["prob_capital_loss_pct"])
+                        fifth_pct = str(summary.get("fifth_percentile_outcome") or "n/a")
+                        asym_raw = summary.get("asymmetry_ratio")
+                        asym_str = f"{float(asym_raw):.1f}x" if isinstance(asym_raw, (int, float)) else str(asym_raw or "n/a")
+                        ten_k_exp = 10_000 * exp_moic
+                        ten_k_base = 10_000 * base_moic
+                    except (TypeError, ValueError, KeyError, ZeroDivisionError):
                         return
 
                     k1, k2, k3, k4 = st.columns(4)
                     with k1:
                         st.metric(
-                            f"Expected Return (by {yr})",
+                            "Expected 5Y Return (USD)",
                             f"{exp_tot:+.1f}%",
-                            f"{ccy} {cur_p:.2f} -> {exp_p:.2f}" if cur_p > 0 else f"{exp_irr:+.1f}%/yr",
+                            f"{exp_moic:.2f}x MOIC · {exp_irr:+.1f}%/yr IRR",
                         )
                     with k2:
                         st.metric(
-                            f"$10,000 Becomes ({yr})",
+                            "$10,000 Cumulative Proceeds",
                             f"${ten_k_exp:,.0f}",
-                            f"Base: {base_tot:+.1f}% total",
+                            f"Base: ${ten_k_base:,.0f} ({base_tot:+.1f}%)",
                         )
                     with k3:
                         st.metric(
-                            "Bear -> Bull (5Y Total)",
-                            f"{bear_tot:+.0f}% to {bull_tot:+.0f}%",
-                            f"Catastrophe: {cat_tot:+.0f}%",
+                            f"Base Target ({yr})",
+                            f"${base_p:.2f}",
+                            f"Today: ${cur_p:.2f} · Bear→Bull: {bear_tot:+.0f}% to {bull_tot:+.0f}%",
                             delta_color="off",
                         )
                     with k4:
                         st.metric(
-                            "Verdict & Max Size",
-                            f"{verdict} ({max_w:.1f}%)",
-                            f"Annualized: {exp_irr:+.1f}%/yr",
+                            "Downside & Asymmetry",
+                            f"{prob_loss:.0f}% Loss Prob.",
+                            f"5th Pct: {fifth_pct} · Asym: {asym_str}",
                             delta_color="off",
                         )
 
@@ -1082,12 +1114,31 @@ with tab_batch:
                     if do_fund:
                         try:
                             t_obj = create_quiet_ticker(clean_tk)
+                            generate_valuation_pack(clean_tk, ticker_obj=t_obj, on_status=lambda m: st_box.write(m))
                             generate_company_brief(clean_tk, ticker_obj=t_obj, on_status=lambda m: st_box.write(m))
-                            generate_peers_report(clean_tk, ticker_obj=t_obj, on_status=lambda m: st_box.write(m))
+                            batch_peers: List[str] = []
+                            ds_k_batch = api_keys.get("deepseek", "").strip()
+                            if ds_k_batch:
+                                prof_b = extract_company_profile(t_obj)
+                                batch_peers = discover_peer_tickers(
+                                    ticker=clean_tk,
+                                    api_key=ds_k_batch,
+                                    company_name=prof_b.get("company_name", ""),
+                                    sector=prof_b.get("sector", ""),
+                                    industry=prof_b.get("industry", ""),
+                                    country=prof_b.get("country", ""),
+                                    business_summary=prof_b.get("business_summary", ""),
+                                )
+                            generate_peers_report(
+                                clean_tk,
+                                ticker_obj=t_obj,
+                                peer_tickers=batch_peers,
+                                on_status=lambda m: st_box.write(m),
+                            )
                             generate_valuation_bundle(
                                 clean_tk, ticker_obj=t_obj, generate_excel=True, on_status=lambda m: st_box.write(m)
                             )
-                            st_box.write("Fundamentals: CompanyBrief.md, Peers.md & Valuation/ saved.")
+                            st_box.write("Fundamentals: ValuationPack.md, CompanyBrief.md, Peers.md & Valuation/ saved.")
                         except Exception as exc:
                             st_box.error(f"Fundamentals error for {clean_tk}: {exc}")
                     st_box.update(label=f"[{idx+1}/{len(tickers)}] {clean_tk} done", state="complete")

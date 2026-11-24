@@ -519,19 +519,188 @@ def _format_breakdown_rows(
 # 2. PEERS & INDUSTRY COMPARISON (`data/<TICKER>/Peers.md`)
 # ============================================================================
 
+def extract_company_profile(ticker_obj: Any) -> Dict[str, str]:
+    """Extract lightweight company identity & business summary from DefeatBeta `info()`."""
+    info_df = _safe_call(ticker_obj, "info")
+    out: Dict[str, str] = {}
+    if _df_is_empty(info_df):
+        return out
+    row = info_df.iloc[0]
+    for src_col, dst_key in (
+        ("short_name", "company_name"),
+        ("long_name", "company_name"),
+        ("company_name", "company_name"),
+        ("name", "company_name"),
+        ("sector", "sector"),
+        ("industry", "industry"),
+        ("country", "country"),
+        ("long_business_summary", "business_summary"),
+    ):
+        if src_col in info_df.columns and not out.get(dst_key):
+            raw = row.get(src_col)
+            if raw is not None and not _is_nan(raw) and str(raw).strip():
+                out[dst_key] = str(raw).strip()
+    return out
+
+
+def _median_float(values: Sequence[float]) -> Optional[float]:
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2 == 1:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2.0
+
+
+def _extract_ttm_ebit_and_tax(q_inc_obj: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Extract `(ttm_ebit, ttm_pretax, ttm_tax)` from a DefeatBeta quarterly income statement's TTM column."""
+    df = _extract_statement_df(q_inc_obj)
+    if _df_is_empty(df):
+        return None, None, None
+    cols = list(df.columns)
+    if not cols:
+        return None, None, None
+    label_col = cols[0] if str(cols[0]).lower() in ("breakdown", "item", "metric", "line_item") else None
+    period_cols = [c for c in cols if c != label_col]
+    ttm_col = next((c for c in period_cols if str(c).strip().upper() == "TTM"), None)
+
+    def _find_val(keywords: Sequence[str]) -> Optional[float]:
+        for idx, row in df.iterrows():
+            lbl = str(row[label_col] if label_col is not None else idx).strip().lower()
+            if not any(lbl == kw or kw in lbl for kw in keywords):
+                continue
+            if ttm_col is not None:
+                v = row.get(ttm_col)
+                if not _is_nan(v) and str(v).strip() not in ("", "*", "None", "nan"):
+                    try:
+                        return float(str(v).replace(",", ""))
+                    except (TypeError, ValueError):
+                        pass
+            # Fallback: sum latest 4 quarterly columns if TTM column is absent
+            q_vals: List[float] = []
+            for pc in period_cols[:4]:
+                v = row.get(pc)
+                if not _is_nan(v) and str(v).strip() not in ("", "*", "None", "nan"):
+                    try:
+                        q_vals.append(float(str(v).replace(",", "")))
+                    except (TypeError, ValueError):
+                        pass
+            if len(q_vals) == 4:
+                return sum(q_vals)
+        return None
+
+    ebit = _find_val(("operating income", "ebit"))
+    pretax = _find_val(("pretax income",))
+    tax = _find_val(("tax provision",))
+    return ebit, pretax, tax
+
+
+def _fetch_named_peer_row(
+    peer_symbol: str,
+    peer_obj: Any,
+    fx_cache: Dict[str, Optional[float]],
+    fx_session: Optional[Any] = None,
+) -> Optional[Dict[str, Any]]:
+    """Pull date-stamped GAAP market & valuation multiples for one named peer ticker from DefeatBeta."""
+    mcap_val, mcap_dt = _latest_value(_safe_call(peer_obj, "market_capitalization"), ["market_capitalization", "market_cap"])
+    price_val, price_dt = _latest_value(_safe_call(peer_obj, "price"), ["close", "adj_close", "price"])
+    if mcap_val is None and price_val is None:
+        return None
+
+    ev_val, _ = _latest_value(_safe_call(peer_obj, "enterprise_value"), ["enterprise_value", "ev"])
+    pe_val, _ = _latest_value(_safe_call(peer_obj, "ttm_pe"), ["ttm_pe", "pe"])
+    pb_val, _ = _latest_value(_safe_call(peer_obj, "pb_ratio"), ["pb_ratio", "pb"])
+    ps_val, _ = _latest_value(_safe_call(peer_obj, "ps_ratio"), ["ps_ratio", "ps"])
+    roe_val, _ = _latest_value(_safe_call(peer_obj, "roe"), ["roe"])
+    roic_val, _ = _latest_value(_safe_call(peer_obj, "roic"), ["roic"])
+
+    peer_ccy = _detect_currency(peer_obj)
+    if peer_ccy not in fx_cache:
+        rate, _, _ = fetch_spot_fx_rate(peer_ccy, "USD", session=fx_session)
+        fx_cache[peer_ccy] = rate
+    fx_to_usd = fx_cache[peer_ccy]
+
+    ev_nopat_val: Optional[float] = None
+    ev_nopat_label = "n/a"
+    ebit_raw, pretax_raw, tax_raw = _extract_ttm_ebit_and_tax(_safe_call(peer_obj, "quarterly_income_statement"))
+    if ev_val is not None and ebit_raw is not None and fx_to_usd is not None:
+        # Clamp effective tax to [0%, 35%] or default to 21% if pretax <= 0
+        if pretax_raw is not None and pretax_raw > 0 and tax_raw is not None:
+            eff_tax = min(0.35, max(0.0, tax_raw / pretax_raw))
+        else:
+            eff_tax = 0.21
+        nopat_usd = ebit_raw * (1.0 - eff_tax) * fx_to_usd
+        if ev_val <= 0:
+            ev_nopat_label = "neg EV"
+        elif nopat_usd <= 0:
+            ev_nopat_label = "neg NOPAT"
+        else:
+            ev_nopat_val = ev_val / nopat_usd
+            ev_nopat_label = f"{ev_nopat_val:.2f}x"
+
+    prof = extract_company_profile(peer_obj)
+    return {
+        "ticker": peer_symbol,
+        "name": prof.get("company_name") or peer_symbol,
+        "as_of": mcap_dt or price_dt or "n/a",
+        "mcap_usd": mcap_val,
+        "ev_usd": ev_val,
+        "ev_nopat": ev_nopat_val,
+        "ev_nopat_label": ev_nopat_label,
+        "pe": pe_val if (pe_val is not None and pe_val > 0) else None,
+        "pe_raw": pe_val,
+        "pb": pb_val if (pb_val is not None and pb_val > 0) else None,
+        "ps": ps_val if (ps_val is not None and ps_val > 0) else None,
+        "roe": roe_val,
+        "roic": roic_val,
+    }
+
+
 def generate_peers_report(
     ticker: str,
     data_root: Path = DEFAULT_DATA_ROOT,
     ticker_obj: Optional[Any] = None,
+    peer_tickers: Optional[Sequence[str]] = None,
+    peer_ticker_factory: Optional[Callable[[str], Any]] = None,
+    fx_session: Optional[Any] = None,
     on_status: Optional[Callable[[str], None]] = None,
 ) -> Path:
-    """Compare company valuation & return multiples against industry aggregates."""
+    """Compare company valuation & return multiples against named global peers (Anchor 1) and industry aggregates."""
     clean = sanitize_ticker(ticker)
     t = ticker_obj if ticker_obj is not None else create_quiet_ticker(clean)
 
-    if on_status:
-        on_status(f"Comparing {clean} against industry peers...")
+    def _emit(msg: str) -> None:
+        if on_status:
+            on_status(msg)
 
+    _emit(f"Comparing {clean} against peers & industry benchmarks...")
+
+    # ── Part 1: Anchor 1 Named Global Peers (live DefeatBeta data) ───────────
+    named_rows: List[Dict[str, Any]] = []
+    if peer_tickers:
+        fx_cache: Dict[str, Optional[float]] = {"USD": 1.0}
+        factory = peer_ticker_factory or create_quiet_ticker
+        seen_peers: Set[str] = {clean}
+        for raw_p in peer_tickers:
+            try:
+                p_clean = sanitize_ticker(raw_p)
+            except ValueError:
+                continue
+            if p_clean in seen_peers:
+                continue
+            seen_peers.add(p_clean)
+            _emit(f"Fetching live DefeatBeta multiples for peer {p_clean}...")
+            try:
+                p_obj = factory(p_clean)
+                row = _fetch_named_peer_row(p_clean, p_obj, fx_cache=fx_cache, fx_session=fx_session)
+                if row:
+                    named_rows.append(row)
+            except Exception:
+                continue
+
+    # ── Part 2: DefeatBeta Industry Aggregate (secondary context) ────────────
     comparisons = [
         ("TTM P/E", "ttm_pe", ["ttm_pe", "pe"], "industry_ttm_pe", ["industry_pe", "ttm_pe", "industry_ttm_pe"], False),
         ("Price / Sales (P/S)", "ps_ratio", ["ps_ratio", "ps"], "industry_ps_ratio", ["industry_ps", "ps_ratio", "industry_ps_ratio"], False),
@@ -540,7 +709,7 @@ def generate_peers_report(
         ("ROIC", "roic", ["roic"], "industry_roic", ["industry_roic", "roic"], True),
     ]
 
-    rows: List[Tuple[str, str, str, str]] = []
+    ind_rows: List[Tuple[str, str, str, str]] = []
     for label, co_method, co_cols, ind_method, ind_cols, is_pct in comparisons:
         co_val, _ = _latest_value(_safe_call(t, co_method), co_cols)
         ind_val, _ = _latest_value(_safe_call(t, ind_method), ind_cols)
@@ -552,26 +721,66 @@ def generate_peers_report(
         if co_val is not None and ind_val is not None:
             diff = co_val - ind_val
             spread = f"{diff * 100:+.2f} pp" if is_pct else f"{diff:+.2f}x"
-        rows.append((label, co_str, ind_str, spread))
+        ind_rows.append((label, co_str, ind_str, spread))
 
-    info_df = _safe_call(t, "info")
-    industry_name = "n/a"
-    if not _df_is_empty(info_df) and "industry" in info_df.columns:
-        raw_ind = info_df.iloc[0].get("industry")
-        if raw_ind and not _is_nan(raw_ind):
-            industry_name = str(raw_ind)
+    prof = extract_company_profile(t)
+    industry_name = prof.get("industry", "n/a")
 
     lines = [
-        f"# {clean} — Industry & Peer Multiples Comparison",
+        f"# {clean} — Global Peer Group & Industry Multiples Comparison",
         "",
         f"- **Generated:** {date.today().isoformat()}",
-        f"- **Industry:** {industry_name}",
-        "- **Note:** Industry benchmarks may show `n/a` for thin micro-cap industries or negative earnings.",
+        f"- **DefeatBeta Industry Tag:** {industry_name}",
+        "- **Basis:** GAAP TTM multiples from DefeatBeta Open Financial Dataset (USD market values; constant valuation-date FX for peer NOPAT).",
+        "",
+    ]
+
+    if named_rows:
+        lines.extend([
+            "## Anchor 1 — Named Global Peer Group (`[Market Data: DefeatBeta]`, GAAP Basis)",
+            "",
+            "| Peer | Company | As-Of Date | Market Cap (USD) | EV (USD) | TTM EV/NOPAT | TTM P/E | P/B | P/S | ROE | ROIC |",
+            "| :--- | :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ])
+        for r in named_rows:
+            pe_disp = _fmt_num(r["pe_raw"], 2, "x") if r["pe_raw"] is not None else "n/a"
+            lines.append(
+                f"| `{r['ticker']}` | {r['name'].replace('|', '/')} | `{r['as_of']}` | "
+                f"{_fmt_money(r['mcap_usd'], 'USD')} | {_fmt_money(r['ev_usd'], 'USD')} | "
+                f"{r['ev_nopat_label']} | {pe_disp} | {_fmt_num(r['pb'], 2, 'x')} | "
+                f"{_fmt_num(r['ps'], 2, 'x')} | {_fmt_pct(r['roe'])} | {_fmt_pct(r['roic'])} |"
+            )
+
+        med_ev_nopat = _median_float([r["ev_nopat"] for r in named_rows if r["ev_nopat"] is not None])
+        med_pe = _median_float([r["pe"] for r in named_rows if r["pe"] is not None])
+        med_pb = _median_float([r["pb"] for r in named_rows if r["pb"] is not None])
+        med_ps = _median_float([r["ps"] for r in named_rows if r["ps"] is not None])
+        med_roe = _median_float([r["roe"] for r in named_rows if r["roe"] is not None])
+        med_roic = _median_float([r["roic"] for r in named_rows if r["roic"] is not None])
+        lines.append(
+            f"| **Peer Median** | *(positive multiples)* | — | — | — | "
+            f"**{_fmt_num(med_ev_nopat, 2, 'x')}** | **{_fmt_num(med_pe, 2, 'x')}** | "
+            f"**{_fmt_num(med_pb, 2, 'x')}** | **{_fmt_num(med_ps, 2, 'x')}** | "
+            f"**{_fmt_pct(med_roe)}** | **{_fmt_pct(med_roic)}** |"
+        )
+        lines.append("")
+    else:
+        lines.extend([
+            "## Anchor 1 — Named Global Peer Group",
+            "",
+            "_No named global peers fetched yet (configure DeepSeek API key and run **Prepare Valuation Dataset** to auto-discover comparable peers)._",
+            "",
+        ])
+
+    lines.extend([
+        "## Secondary Context — DefeatBeta Industry Aggregate",
+        "",
+        "_Note: Broad sector/industry aggregates can be misclassified (e.g. an insurtech tagged as `Software-Application`). Use Anchor 1 Named Peers above as primary benchmark._",
         "",
         "| Metric | Company | Industry Benchmark | Spread (Co − Ind) |",
         "| :--- | ---: | ---: | ---: |",
-    ]
-    for label, co_str, ind_str, spread in rows:
+    ])
+    for label, co_str, ind_str, spread in ind_rows:
         lines.append(f"| {label} | {co_str} | {ind_str} | {spread} |")
 
     out_dir = data_root / clean
@@ -1206,15 +1415,13 @@ def _compute_multiple_band(df: Any, preferred_cols: Sequence[str], min_year: int
 
 def generate_valuation_pack(
     ticker: str,
-    home_currency: str = "USD",
     data_root: Path = DEFAULT_DATA_ROOT,
     ticker_obj: Optional[Any] = None,
     fx_session: Optional[Any] = None,
     on_status: Optional[Callable[[str], None]] = None,
 ) -> ValuationPackResult:
-    """Build `data/<TICKER>/ValuationPack.md` with structured tables tailored to the 5-Year Hurdle-Rate Protocol."""
+    """Build `data/<TICKER>/ValuationPack.md` with structured USD-ready tables for the 5-Year Valuation Protocol."""
     clean = sanitize_ticker(ticker)
-    home_ccy = (home_currency or "USD").strip().upper()
     t = ticker_obj if ticker_obj is not None else create_quiet_ticker(clean)
 
     def _emit(msg: str) -> None:
@@ -1224,7 +1431,7 @@ def generate_valuation_pack(
     _emit(f"Extracting latest price, FX & reporting currency for {clean}...")
     currency = _detect_currency(t)
     price_val, price_dt = _latest_value(_safe_call(t, "price"), ["close", "adj_close", "price"])
-    fx_rate, fx_dt, fx_src = fetch_spot_fx_rate(currency, home_ccy, session=fx_session)
+    fx_rate, fx_dt, fx_src = fetch_spot_fx_rate(currency, "USD", session=fx_session)
 
     mcap_val, mcap_dt = _latest_value(_safe_call(t, "market_capitalization"), ["market_capitalization", "market_cap"])
     ev_val, _ = _latest_value(_safe_call(t, "enterprise_value"), ["enterprise_value", "ev"])
@@ -1261,27 +1468,20 @@ def generate_valuation_pack(
             f"> **ADS / Share-Class Ratio Alert:** Balance-sheet `Ordinary Shares Number` "
             f"({_fmt_money(ord_shares)}{ord_dt_note}) is **{raw_ratio:.2f}x** vs. current implied tradable shares "
             f"(`Market Cap / Price = {_fmt_money(implied_tradable_shares)}`{mkt_dt_note}). "
-            f"Because balance-sheet share counts can lag recent issuance, verify the exact `1 ADS = N Ordinary Shares` "
-            f"conversion ratio in the latest `20-F`/`6-K` and ALWAYS divide terminal equity by the **tradable / ADS share count** "
-            f"({_fmt_money(implied_tradable_shares)}), never raw ordinary shares.\n"
+            f"Verify the exact `1 ADS = N Ordinary Shares` conversion ratio and whether `Market Cap / Price` "
+            f"excludes Class B shares in the latest `20-F`/`6-K`; ALWAYS divide terminal equity by the "
+            f"**latest filing's Diluted ADS/Tradable Share Count**, never raw ordinary shares.\n"
         )
 
     fx_guidance_note = ""
-    if currency != home_ccy:
-        rate_str = f"`× {fx_rate:.6f}`" if fx_rate is not None else f"the `{currency} -> {home_ccy}` spot rate"
-        if home_ccy == "USD":
-            fx_guidance_note = (
-                f"> **FX Conversion Rule:** `Latest Close Price`, `Market Cap (USD)`, and `Enterprise Value (USD)` "
-                f"are **already in USD (home currency) — do NOT convert them.** "
-                f"Only the `{currency}` financial statement tables below convert to `USD` via {rate_str}.\n"
-            )
-        else:
-            fx_guidance_note = (
-                f"> **FX Conversion Rule:** `Latest Close Price`, `Market Cap (USD)`, and `Enterprise Value (USD)` "
-                f"are in **USD (listing currency)** — do NOT apply the `{currency} -> {home_ccy}` rate to them "
-                f"(convert them via `USD -> {home_ccy}` separately). Only the `{currency}` financial statement tables "
-                f"below convert to `{home_ccy}` via {rate_str}.\n"
-            )
+    if currency != "USD":
+        rate_str = f"`× {fx_rate:.6f}`" if fx_rate is not None else f"the `{currency} -> USD` spot rate"
+        fx_guidance_note = (
+            f"> **Universal USD Constant-FX Rule:** `Latest Close Price`, `Market Cap (USD)`, and `Enterprise Value (USD)` "
+            f"are **already in USD — do NOT convert them.** "
+            f"Translate ALL `{currency}` financial statement tables below to `USD` using this single valuation-date spot rate "
+            f"({rate_str}); ignore any historical blended USD translations in older filings or summary briefs.\n"
+        )
 
     inc_keywords = (
         "total revenue", "gross profit", "operating income", "ebit", "net interest",
@@ -1307,16 +1507,16 @@ def generate_valuation_pack(
         f"# {clean} — Valuation Protocol Dataset Pack (`ValuationPack.md`)",
         "",
         f"- **Generated:** {date.today().isoformat()}",
-        f"- **Reporting Currency:** `{currency}` | **Investor Home Currency:** `{home_ccy}`",
-        "- **Purpose:** Pre-extracted structured financial tables & historical valuation bands tailored for the 5-Year Hurdle-Rate Valuation Protocol. Cross-check footnotes (ADS ratio, VIE/offshore cash split, one-time items) against attached SEC filings (`10-K`/`20-F`/`10-Q`/`6-K`) and transcripts.",
+        f"- **Reporting Currency:** `{currency}` | **Valuation Currency:** `USD` *(Universal USD Policy — constant valuation-date spot FX)*",
+        "- **Purpose:** Pre-extracted structured financial tables & historical valuation bands tailored for the 5-Year Equity Valuation & Probability-Weighted Return Protocol. Cross-check footnotes (ADS ratio, Class A/B diluted count, VIE/offshore cash split, one-time items) against attached SEC filings (`10-K`/`20-F`/`10-Q`/`6-K`) and transcripts.",
         "",
         "## 1. Market Snapshot & Spot FX (`[Market Data]`)",
         "",
         "| Field | Value | Source Tag |",
         "| :--- | ---: | :--- |",
         f"| Latest Close Price (USD — Listing / ADS) | {_fmt_num(price_val, 2) if price_val is not None else 'not provided'} | `[Market Data: DefeatBeta, {price_dt or 'n/a'}]` |",
-        f"| Implied Shares Outstanding (Tradable / ADS Basis) | {_fmt_money(implied_tradable_shares) if implied_tradable_shares is not None else 'not provided'} | `[Derived: Market Cap / Close Price]` |",
-        f"| Spot FX (`1 {currency} -> {home_ccy}`) | {f'{fx_rate:.6f}' if fx_rate is not None else 'not provided'} | `[Market Data: {fx_src or 'unavailable'}, {fx_dt or 'n/a'}]` |",
+        f"| Implied Shares Outstanding (Market Cap / Price) | {_fmt_money(implied_tradable_shares) if implied_tradable_shares is not None else 'not provided'} | `[Derived: Market Cap / Close Price — verify Class A+B diluted count in filing]` |",
+        f"| Spot FX (`1 {currency} -> USD`) | {f'{fx_rate:.6f}' if fx_rate is not None else 'not provided'} | `[Market Data: {fx_src or 'unavailable'}, {fx_dt or 'n/a'}]` |",
         f"| Market Cap (USD) | {_fmt_money(mcap_val, 'USD')} | `[Market Data: DefeatBeta, {mcap_dt or 'n/a'}]` |",
         f"| Enterprise Value (USD) | {_fmt_money(ev_val, 'USD')} | `[Market Data: DefeatBeta, {mcap_dt or 'n/a'}]` |",
         f"| TTM P/E | {_fmt_num(pe_val, 2, 'x')} | `[Market Data: DefeatBeta, {mcap_dt or 'n/a'}]` |",
@@ -1377,7 +1577,7 @@ def generate_valuation_pack(
         ticker=clean,
         path=out_path,
         currency=currency,
-        home_currency=home_ccy,
+        home_currency="USD",
         latest_price=price_val,
         latest_price_date=price_dt,
         fx_rate=fx_rate,
