@@ -640,19 +640,25 @@ with tab_ai:
                 f"No Markdown files found in `data/{ai_ticker}/` yet. Click **📦 Prepare Valuation Dataset for {ai_ticker}** above to fetch everything in one click."
             )
         else:
-            # Smart default selection: ValuationPack + Brief + Peers + up to 4 transcripts + 2 newest SEC filings
+            # Smart default selection: ValuationPack + Brief + Peers + 4 transcripts + 1 Annual (20-F/10-K) + 2 Quarterly/Earnings
             default_selected = []
             tr_count = 0
-            sec_count = 0
+            annual_sec_count = 0
+            other_sec_count = 0
             for df in dossier_files:
                 if df.category in ("Summary", "Valuation", "Peers"):
                     default_selected.append(df.rel_label)
                 elif df.category == "Transcript" and tr_count < 4:
                     default_selected.append(df.rel_label)
                     tr_count += 1
-                elif df.category == "SEC Filing" and sec_count < 2:
-                    default_selected.append(df.rel_label)
-                    sec_count += 1
+                elif df.category == "SEC Filing":
+                    is_annual = any(tag in df.rel_label.upper() for tag in ("20-F", "10-K", "40-F", "F-1", "S-1"))
+                    if is_annual and annual_sec_count < 1:
+                        default_selected.append(df.rel_label)
+                        annual_sec_count += 1
+                    elif not is_annual and other_sec_count < 2:
+                        default_selected.append(df.rel_label)
+                        other_sec_count += 1
             if not default_selected:
                 default_selected = [dossier_files[0].rel_label]
 

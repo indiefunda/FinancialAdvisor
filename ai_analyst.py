@@ -343,6 +343,31 @@ def _transcript_sort_key(path: Path) -> Tuple[int, int, str]:
     return (0, 0, path.name)
 
 
+_ANNUAL_SEC_RE = re.compile(r"\b(20-F|10-K|40-F|F-1|S-1)\b", re.IGNORECASE)
+_QUARTERLY_SEC_RE = re.compile(r"\b(10-Q|Earnings Release)\b", re.IGNORECASE)
+_SEC_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+_SEC_FY_RE = re.compile(r"\bFY\s*(\d{4})\b", re.IGNORECASE)
+
+
+def _sec_filing_sort_key(path: Path) -> Tuple[int, str, str]:
+    """Sort SEC filings by analytical priority (Annual 20-F/10-K > 10-Q/Earnings > other) then recency."""
+    name = path.name
+    if _ANNUAL_SEC_RE.search(name):
+        tier = 3
+    elif _QUARTERLY_SEC_RE.search(name):
+        tier = 2
+    else:
+        tier = 1
+
+    m_dt = _SEC_DATE_RE.search(name)
+    if m_dt:
+        recency = m_dt.group(1)
+    else:
+        m_fy = _SEC_FY_RE.search(name)
+        recency = f"{m_fy.group(1)}-12-31" if m_fy else "0000-00-00"
+    return (tier, recency, name)
+
+
 def list_dossier_files(ticker: str, data_root: Path = DEFAULT_DATA_ROOT) -> List[DossierFile]:
     """Discover all local Markdown files for a ticker, ordered by analytical value."""
     clean = sanitize_ticker(ticker)
@@ -371,10 +396,10 @@ def list_dossier_files(ticker: str, data_root: Path = DEFAULT_DATA_ROOT) -> List
         for p in sorted(tr_dir.glob("*.md"), key=_transcript_sort_key, reverse=True):
             found.append(DossierFile(f"EarningsTranscripts/{p.name}", p, "Transcript", p.stat().st_size))
 
-    # Priority 3: SEC filings (newest first)
+    # Priority 3: SEC filings (Annual 20-F/10-K first, then 10-Q/Earnings Release, newest first)
     sec_dir = t_root / "DataFromDataMule_markdown"
     if sec_dir.exists():
-        for p in sorted(sec_dir.glob("*.md"), reverse=True):
+        for p in sorted(sec_dir.glob("*.md"), key=_sec_filing_sort_key, reverse=True):
             found.append(DossierFile(f"DataFromDataMule_markdown/{p.name}", p, "SEC Filing", p.stat().st_size))
 
     return found

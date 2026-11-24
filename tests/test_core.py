@@ -591,6 +591,8 @@ def test_deepseek_transcript_sorting_and_unique_same_day_memos(tmp_path: Path):
         "<!-- financial-advisor-meta\nticker: HUIZ\naccession_number: 0001193125-26-000111\n-->\n\n# Annual Report Body\n",
         encoding="utf-8",
     )
+    (t_dir / "DataFromDataMule_markdown" / "HUIZ - Earnings Release 2026-09-10.md").write_text("# ER Q2", encoding="utf-8")
+    (t_dir / "DataFromDataMule_markdown" / "HUIZ - 6-K 2026-09-10.md").write_text("# 6-K", encoding="utf-8")
 
     # Bug 5 regression: string reverse sort would put Q4 2024 before Q2 2025!
     for fname in ("HUIZ - Q4 2024.md", "HUIZ - Q3 2024.md", "HUIZ - Q1 2025.md", "HUIZ - Q2 2025.md"):
@@ -603,6 +605,12 @@ def test_deepseek_transcript_sorting_and_unique_same_day_memos(tmp_path: Path):
         "EarningsTranscripts/HUIZ - Q1 2025.md",
         "EarningsTranscripts/HUIZ - Q4 2024.md",
         "EarningsTranscripts/HUIZ - Q3 2024.md",
+    ]
+    sec_labels = [f.rel_label for f in files if f.category == "SEC Filing"]
+    assert sec_labels == [
+        "DataFromDataMule_markdown/HUIZ - 20-F FY 2025.md",
+        "DataFromDataMule_markdown/HUIZ - Earnings Release 2026-09-10.md",
+        "DataFromDataMule_markdown/HUIZ - 6-K 2026-09-10.md",
     ]
 
     ctx, trunc = build_dossier_context(files)
