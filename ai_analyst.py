@@ -958,32 +958,53 @@ def discover_peer_tickers(
     industry: str = "",
     country: str = "",
     business_summary: str = "",
+    market_cap_usd: str = "",
+    ttm_revenue_usd: str = "",
     model: str = DEFAULT_MODEL,
-    max_peers: int = 5,
+    max_peers: int = 10,
     session: Optional[requests.Session] = None,
 ) -> List[str]:
-    """Ask DeepSeek to identify publicly traded comparable peer tickers for Anchor 1 benchmarking.
+    """Ask DeepSeek to identify an institutional-grade pool of comparable global peer tickers for Anchor 1.
 
-    Only ticker symbols are requested from the LLM; all live peer multiples and dates are
-    fetched deterministically from `defeatbeta-api`.
+    Requests a balanced mix of scaled regional/direct rivals AND liquid US/global business-model
+    peers (never penny-stock shells or delisted symbols). Only ticker symbols come from the LLM;
+    all live multiples, market caps, and quote dates are fetched and quality-filtered deterministically
+    from `defeatbeta-api` inside `generate_peers_report`.
     """
     if not api_key or not api_key.strip():
         return []
 
     clean = sanitize_ticker(ticker)
+    scale_parts = []
+    if market_cap_usd:
+        scale_parts.append(f"Market Cap: {market_cap_usd}")
+    if ttm_revenue_usd:
+        scale_parts.append(f"TTM Revenue: {ttm_revenue_usd}")
+    scale_line = " | ".join(scale_parts) if scale_parts else "n/a"
+
     prompt = (
-        f"Identify {max_peers} publicly traded comparable competitor tickers for {clean}"
-        f"{f' ({company_name})' if company_name else ''}.\n"
-        f"Sector/Industry tag: {sector or 'n/a'} / {industry or 'n/a'} | Country: {country or 'n/a'}\n"
-        f"Business description: {(business_summary or 'n/a')[:900]}\n\n"
-        "Rules:\n"
-        "1. Pick true economic competitors based on the business description (ignore misclassified industry tags).\n"
-        "2. Prefer US-listed equities / ADRs (NYSE/NASDAQ tickers) so live financial statements are available.\n"
-        f"3. Exclude {clean} itself and any delisted/private companies.\n"
-        "4. Return ONLY a raw JSON array of ticker strings, e.g. [\"WDH\", \"HUIZ\", \"LMND\", \"SLQT\"]."
+        f"Select up to {max_peers} actively traded, institutional-grade comparable competitor tickers for {clean}"
+        f"{f' ({company_name})' if company_name else ''} to build an Anchor 1 Global Peer Group.\n"
+        f"Scale: {scale_line}\n"
+        f"Sector/Industry tag: {sector or 'n/a'} / {industry or 'n/a'} | Headquarters/Country: {country or 'n/a'}\n"
+        f"Business description: {(business_summary or 'n/a')[:1000]}\n\n"
+        "Institutional Peer Selection Rules:\n"
+        "1. Anchor on the TRUE economic business model from the description — ignore misclassified sector tags.\n"
+        "2. Build a BALANCED GLOBAL comp set (do NOT fill the list with tiny local penny stocks):\n"
+        "   - Bucket A (Direct regional/local peers, up to 2–3): ONLY actively traded, scaled direct competitors in the same home market.\n"
+        "   - Bucket B (Scaled global / US business-model peers, 4–6): Liquid, actively traded NYSE/NASDAQ companies (generally >$100M market cap) with the closest unit economics, distribution model, and customer/revenue structure — even if headquartered in the US or Europe.\n"
+        "3. STRICTLY EXCLUDE: delisted, acquired, or renamed tickers; SPAC shells; micro/nano-cap illiquid stocks (<$25M market cap unless the target itself is <$50M); and unrelated conglomerates.\n"
+        f"4. Exclude {clean} itself. Order from strongest direct & scaled business-model comps first.\n"
+        "5. Return ONLY a raw JSON array of active NYSE/NASDAQ ticker strings (no prose), e.g. [\"PEER1\", \"PEER2\", \"PEER3\"]."
     )
     messages = [
-        {"role": "system", "content": "You return only a JSON array of valid publicly traded stock ticker symbols."},
+        {
+            "role": "system",
+            "content": (
+                "You are an institutional equity research analyst selecting Anchor 1 global comparable companies. "
+                "Return ONLY a JSON array of active, liquid, publicly traded NYSE/NASDAQ stock ticker symbols."
+            ),
+        },
         {"role": "user", "content": prompt},
     ]
 
@@ -1000,7 +1021,7 @@ def discover_peer_tickers(
     except Exception:
         return []
 
-    m = re.search(r"\[[^\]]*\]", content, re.DOTALL)
+    m = re.search(r"\[.*\]", content, re.DOTALL)
     if not m:
         return []
     try:
@@ -1013,10 +1034,11 @@ def discover_peer_tickers(
     peers: List[str] = []
     seen = {clean}
     for item in raw_list:
-        if not isinstance(item, str):
+        raw_sym = item.get("ticker") if isinstance(item, dict) else item
+        if not isinstance(raw_sym, str):
             continue
         try:
-            sym = sanitize_ticker(item)
+            sym = sanitize_ticker(raw_sym)
         except ValueError:
             continue
         if sym not in seen:

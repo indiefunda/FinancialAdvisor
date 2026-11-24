@@ -444,8 +444,8 @@ with tab_fund:
                         auto_peers = []
                         ds_key_tab3 = api_keys.get("deepseek", "").strip()
                         if ds_key_tab3:
-                            status.write(f"🔍 Searching comparable listed peers for {clean_t}...")
-                            prof = extract_company_profile(t_obj)
+                            status.write(f"🔍 Searching institutional global & regional peers for {clean_t}...")
+                            prof = extract_company_profile(t_obj, include_scale=True)
                             auto_peers = discover_peer_tickers(
                                 ticker=clean_t,
                                 api_key=ds_key_tab3,
@@ -454,9 +454,11 @@ with tab_fund:
                                 industry=prof.get("industry", ""),
                                 country=prof.get("country", ""),
                                 business_summary=prof.get("business_summary", ""),
+                                market_cap_usd=prof.get("market_cap_usd", ""),
+                                ttm_revenue_usd=prof.get("ttm_revenue_usd", ""),
                             )
                             if auto_peers:
-                                status.write(f"🔍 Discovered peers: {', '.join(auto_peers)}")
+                                status.write(f"🔍 Candidate peers ({len(auto_peers)}): {', '.join(auto_peers)} — running live quality gate...")
                         peers_path = generate_peers_report(
                             clean_t,
                             ticker_obj=t_obj,
@@ -613,8 +615,8 @@ with tab_ai:
                     try:
                         discovered_peers: List[str] = []
                         if deepseek_key:
-                            prep_st.write(f"🔍 AI searching comparable listed competitors for {ai_ticker}...")
-                            prof = extract_company_profile(_get_ticker_obj())
+                            prep_st.write(f"🔍 AI searching institutional global & regional peers for {ai_ticker}...")
+                            prof = extract_company_profile(_get_ticker_obj(), include_scale=True)
                             discovered_peers = discover_peer_tickers(
                                 ticker=ai_ticker,
                                 api_key=deepseek_key,
@@ -623,9 +625,14 @@ with tab_ai:
                                 industry=prof.get("industry", ""),
                                 country=prof.get("country", ""),
                                 business_summary=prof.get("business_summary", ""),
+                                market_cap_usd=prof.get("market_cap_usd", ""),
+                                ttm_revenue_usd=prof.get("ttm_revenue_usd", ""),
                             )
                             if discovered_peers:
-                                prep_st.write(f"🔍 Found comparable peers: **{', '.join(discovered_peers)}** — pulling live DefeatBeta multiples...")
+                                prep_st.write(
+                                    f"🔍 Candidate peers ({len(discovered_peers)}): **{', '.join(discovered_peers)}** "
+                                    "— filtering stale/nano-cap tickers & pulling live DefeatBeta multiples..."
+                                )
                         generate_peers_report(
                             ai_ticker,
                             ticker_obj=_get_ticker_obj(),
@@ -1251,7 +1258,7 @@ with tab_batch:
                             batch_peers: List[str] = []
                             ds_k_batch = api_keys.get("deepseek", "").strip()
                             if ds_k_batch:
-                                prof_b = extract_company_profile(t_obj)
+                                prof_b = extract_company_profile(t_obj, include_scale=True)
                                 batch_peers = discover_peer_tickers(
                                     ticker=clean_tk,
                                     api_key=ds_k_batch,
@@ -1260,6 +1267,8 @@ with tab_batch:
                                     industry=prof_b.get("industry", ""),
                                     country=prof_b.get("country", ""),
                                     business_summary=prof_b.get("business_summary", ""),
+                                    market_cap_usd=prof_b.get("market_cap_usd", ""),
+                                    ttm_revenue_usd=prof_b.get("ttm_revenue_usd", ""),
                                 )
                             generate_peers_report(
                                 clean_tk,

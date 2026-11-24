@@ -519,28 +519,45 @@ def _format_breakdown_rows(
 # 2. PEERS & INDUSTRY COMPARISON (`data/<TICKER>/Peers.md`)
 # ============================================================================
 
-def extract_company_profile(ticker_obj: Any) -> Dict[str, str]:
-    """Extract lightweight company identity & business summary from DefeatBeta `info()`."""
+def extract_company_profile(ticker_obj: Any, *, include_scale: bool = False) -> Dict[str, str]:
+    """Extract lightweight company identity, business summary, and optional USD scale from DefeatBeta."""
     info_df = _safe_call(ticker_obj, "info")
     out: Dict[str, str] = {}
-    if _df_is_empty(info_df):
-        return out
-    row = info_df.iloc[0]
-    for src_col, dst_key in (
-        ("short_name", "company_name"),
-        ("long_name", "company_name"),
-        ("company_name", "company_name"),
-        ("name", "company_name"),
-        ("sector", "sector"),
-        ("industry", "industry"),
-        ("country", "country"),
-        ("long_business_summary", "business_summary"),
-    ):
-        if src_col in info_df.columns and not out.get(dst_key):
-            raw = row.get(src_col)
-            if raw is not None and not _is_nan(raw) and str(raw).strip():
-                out[dst_key] = str(raw).strip()
+    if not _df_is_empty(info_df):
+        row = info_df.iloc[0]
+        for src_col, dst_key in (
+            ("short_name", "company_name"),
+            ("long_name", "company_name"),
+            ("company_name", "company_name"),
+            ("name", "company_name"),
+            ("sector", "sector"),
+            ("industry", "industry"),
+            ("country", "country"),
+            ("long_business_summary", "business_summary"),
+        ):
+            if src_col in info_df.columns and not out.get(dst_key):
+                raw = row.get(src_col)
+                if raw is not None and not _is_nan(raw) and str(raw).strip():
+                    out[dst_key] = str(raw).strip()
+
+    if include_scale:
+        mcap_v, _ = _latest_value(_safe_call(ticker_obj, "market_capitalization"), ["market_capitalization", "market_cap"])
+        if mcap_v is not None and mcap_v > 0:
+            out["market_cap_usd"] = _fmt_money(mcap_v, "USD")
+        rev_usd_v, _ = _latest_value(_safe_call(ticker_obj, "ttm_revenue"), ["ttm_total_revenue_usd", "ttm_revenue_usd"])
+        if rev_usd_v is not None and rev_usd_v > 0:
+            out["ttm_revenue_usd"] = _fmt_money(rev_usd_v, "USD")
     return out
+
+
+def _parse_iso_date(val: Optional[str]) -> Optional[date]:
+    if not val:
+        return None
+    s = str(val).strip()[:10]
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        return None
 
 
 def _median_float(values: Sequence[float]) -> Optional[float]:
@@ -637,8 +654,13 @@ def _fetch_named_peer_row(
         elif nopat_usd <= 0:
             ev_nopat_label = "neg NOPAT"
         else:
-            ev_nopat_val = ev_val / nopat_usd
-            ev_nopat_label = f"{ev_nopat_val:.2f}x"
+            raw_mult = ev_val / nopat_usd
+            # Guard against near-zero-EV cash-shell distortions (e.g. EV < 5% of market cap -> 0.10x artifact)
+            if mcap_val is not None and mcap_val > 0 and ev_val < 0.05 * mcap_val:
+                ev_nopat_label = f"{raw_mult:.2f}x (near-zero EV)"
+            else:
+                ev_nopat_val = raw_mult
+                ev_nopat_label = f"{ev_nopat_val:.2f}x"
 
     prof = extract_company_profile(peer_obj)
     return {
@@ -665,9 +687,12 @@ def generate_peers_report(
     peer_tickers: Optional[Sequence[str]] = None,
     peer_ticker_factory: Optional[Callable[[str], Any]] = None,
     fx_session: Optional[Any] = None,
+    min_peer_mcap_usd: Optional[float] = None,
+    max_stale_days: int = 90,
+    max_final_peers: int = 7,
     on_status: Optional[Callable[[str], None]] = None,
 ) -> Path:
-    """Compare company valuation & return multiples against named global peers (Anchor 1) and industry aggregates."""
+    """Compare company valuation & return multiples against quality-filtered named global peers (Anchor 1) and industry aggregates."""
     clean = sanitize_ticker(ticker)
     t = ticker_obj if ticker_obj is not None else create_quiet_ticker(clean)
 
@@ -677,12 +702,27 @@ def generate_peers_report(
 
     _emit(f"Comparing {clean} against peers & industry benchmarks...")
 
-    # ── Part 1: Anchor 1 Named Global Peers (live DefeatBeta data) ───────────
+    # Determine target scale and reference market date for deterministic peer quality filtering
+    target_mcap_val, target_mcap_dt = _latest_value(
+        _safe_call(t, "market_capitalization"), ["market_capitalization", "market_cap"]
+    )
+    ref_date = _parse_iso_date(target_mcap_dt) or date.today()
+    if min_peer_mcap_usd is not None:
+        mcap_floor = max(0.0, float(min_peer_mcap_usd))
+    elif target_mcap_val is not None and target_mcap_val > 0:
+        # Scale-aware nano-cap filter: 5% of target market cap clamped to [$15M, $250M]
+        mcap_floor = min(250_000_000.0, max(15_000_000.0, 0.05 * target_mcap_val))
+    else:
+        mcap_floor = 15_000_000.0
+
+    # ── Part 1: Anchor 1 Named Global Peers (live DefeatBeta data + quality gate) ──
     named_rows: List[Dict[str, Any]] = []
+    filtered_out: List[Tuple[str, str]] = []
     if peer_tickers:
         fx_cache: Dict[str, Optional[float]] = {"USD": 1.0}
         factory = peer_ticker_factory or create_quiet_ticker
         seen_peers: Set[str] = {clean}
+        raw_rows: List[Dict[str, Any]] = []
         for raw_p in peer_tickers:
             try:
                 p_clean = sanitize_ticker(raw_p)
@@ -696,9 +736,36 @@ def generate_peers_report(
                 p_obj = factory(p_clean)
                 row = _fetch_named_peer_row(p_clean, p_obj, fx_cache=fx_cache, fx_session=fx_session)
                 if row:
-                    named_rows.append(row)
+                    raw_rows.append(row)
+                else:
+                    filtered_out.append((p_clean, "no active market data"))
             except Exception:
+                filtered_out.append((p_clean, "fetch error"))
                 continue
+
+        # Advance ref_date if any peer has a fresher market date than target
+        for r in raw_rows:
+            rd = _parse_iso_date(r.get("as_of"))
+            if rd and rd > ref_date:
+                ref_date = rd
+
+        for r in raw_rows:
+            reasons: List[str] = []
+            rd = _parse_iso_date(r.get("as_of"))
+            if rd is not None and max_stale_days > 0 and (ref_date - rd).days > max_stale_days:
+                reasons.append(f"stale quote {r['as_of']}")
+            mcap_v = r.get("mcap_usd")
+            if mcap_v is None or mcap_v <= 0:
+                reasons.append("missing market cap")
+            elif mcap_floor > 0 and mcap_v < mcap_floor:
+                reasons.append(f"mcap {_fmt_money(mcap_v, 'USD')} < {_fmt_money(mcap_floor, 'USD')} floor")
+
+            if reasons:
+                filtered_out.append((r["ticker"], "; ".join(reasons)))
+            else:
+                named_rows.append(r)
+                if len(named_rows) >= max(1, max_final_peers):
+                    break
 
     # ── Part 2: DefeatBeta Industry Aggregate (secondary context) ────────────
     comparisons = [
@@ -768,9 +835,17 @@ def generate_peers_report(
         lines.extend([
             "## Anchor 1 — Named Global Peer Group",
             "",
-            "_No named global peers fetched yet (configure DeepSeek API key and run **Prepare Valuation Dataset** to auto-discover comparable peers)._",
+            "_No named global peers passed quality checks yet (configure DeepSeek API key and run **Prepare Valuation Dataset** to auto-discover comparable peers)._",
             "",
         ])
+
+    if filtered_out:
+        excl_str = ", ".join(f"`{sym}` ({why})" for sym, why in filtered_out)
+        lines.append(
+            f"_Filtered out candidates (quality gate: active quote ≤{max_stale_days}d, "
+            f"market cap ≥ {_fmt_money(mcap_floor, 'USD')}):_ {excl_str}."
+        )
+        lines.append("")
 
     lines.extend([
         "## Secondary Context — DefeatBeta Industry Aggregate",

@@ -1455,6 +1455,99 @@ def test_deepseek_repeated_sse_tool_name_reasoning_400_and_multi_continuation():
     assert mc_stats["continuations_used"] == 2
 
 
+def test_peer_quality_gate_filters_stale_nanocaps_and_near_zero_ev(tmp_path: Path):
+    # 1. discover_peer_tickers includes scale context & global two-bucket mandate, parses dict-list JSON cleanly
+    ds_sess = MagicMock()
+    ds_resp = MagicMock(status_code=200)
+    ds_resp.json.return_value = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"content": '[{"ticker": "WDH"}, {"ticker": "HUIZ"}, {"ticker": "LMND"}, {"ticker": "OSCR"}]'},
+        }],
+        "usage": {"prompt_tokens": 180, "completion_tokens": 35},
+    }
+    ds_sess.post.return_value = ds_resp
+
+    peers = discover_peer_tickers(
+        ticker="YB",
+        api_key="sk-test",
+        company_name="Yuanbao Inc.",
+        country="China",
+        business_summary="Online insurance distribution platform.",
+        market_cap_usd="USD 343.47M",
+        ttm_revenue_usd="USD 742.05M",
+        session=ds_sess,
+    )
+    assert peers == ["WDH", "HUIZ", "LMND", "OSCR"]
+    sent_prompt = ds_sess.post.call_args.kwargs["json"]["messages"][1]["content"]
+    assert "USD 343.47M" in sent_prompt
+    assert "Bucket B (Scaled global / US business-model peers" in sent_prompt
+
+    # 2. generate_peers_report deterministically filters stale quotes (FANH), nano-caps (TIRX, ZBAO),
+    #    and guards near-zero-EV distortion (HUIZ EV=$217K on $21.5M mcap -> excluded from EV/NOPAT median!)
+    class _FakeStmt:
+        def __init__(self, df):
+            self._df = df
+
+        def df(self):
+            return self._df
+
+    def _mk_peer(sym, name, dt, ccy, mcap, ev, pe, pb, ps, ebit, pretax, tax):
+        p = _make_mock_ticker(currency=ccy)
+        p.ticker = sym
+        p.info.return_value = _FakeDF([{"short_name": name}])
+        p.market_capitalization.return_value = _FakeDF([{"report_date": dt, "market_capitalization": mcap}] if mcap is not None else [])
+        p.price.return_value = _FakeDF([{"report_date": dt, "close": 5.0}])
+        p.enterprise_value.return_value = _FakeDF([{"report_date": dt, "enterprise_value": ev}] if ev is not None else [])
+        p.ttm_pe.return_value = _FakeDF([{"report_date": dt, "ttm_pe": pe}] if pe is not None else [])
+        p.pb_ratio.return_value = _FakeDF([{"report_date": dt, "pb_ratio": pb}] if pb is not None else [])
+        p.ps_ratio.return_value = _FakeDF([{"report_date": dt, "ps_ratio": ps}] if ps is not None else [])
+        p.roe.return_value = _FakeDF([{"report_date": dt, "roe": 0.08}])
+        p.roic.return_value = _FakeDF([{"report_date": dt, "roic": 0.07}])
+        p.quarterly_income_statement.return_value = _FakeStmt(_FakeDF([
+            {"Breakdown": "Operating Income", "TTM": ebit},
+            {"Breakdown": "Pretax Income", "TTM": pretax},
+            {"Breakdown": "Tax Provision", "TTM": tax},
+        ]))
+        return p
+
+    # Target mcap = $350M -> dynamic floor = 5% = $17.50M; ref_date = 2026-11-20
+    peer_map = {
+        "WDH": _mk_peer("WDH", "Waterdrop Inc.", "2026-11-20", "USD", 280_000_000, 215_000_000, 4.8, 0.37, 0.38, 70_000_000, 70_000_000, 14_000_000),
+        "HUIZ": _mk_peer("HUIZ", "Huize Holding", "2026-11-20", "USD", 21_500_000, 216_000, 8.5, 0.34, 0.12, 2_700_000, 2_700_000, 540_000),  # EV < 5% mcap => near-zero EV!
+        "OSCR": _mk_peer("OSCR", "Oscar Health", "2026-11-20", "USD", 3_200_000_000, 2_500_000_000, 18.0, 2.80, 0.35, 250_000_000, 250_000_000, 50_000_000),
+        "FANH": _mk_peer("FANH", "Fanhua (Stale)", "2024-12-20", "USD", 120_000_000, 80_000_000, 5.0, 0.40, 0.20, 20_000_000, 20_000_000, 4_000_000),
+        "TIRX": _mk_peer("TIRX", "Tian Ruixiang", "2026-03-13", "USD", 5_000_000, 7_000_000, None, 0.11, None, -1_000_000, -1_000_000, 0),
+        "ZBAO": _mk_peer("ZBAO", "Zhibao Tech", "2026-11-20", "USD", 3_200_000, 10_900_000, None, 1.07, None, 1_360_000, 1_360_000, 272_000),
+    }
+
+    target_mock = _make_mock_ticker(currency="CNY")
+    peers_path = generate_peers_report(
+        "YB",
+        data_root=tmp_path,
+        ticker_obj=target_mock,
+        peer_tickers=["WDH", "HUIZ", "OSCR", "FANH", "TIRX", "ZBAO"],
+        peer_ticker_factory=lambda s: peer_map[s],
+    )
+    txt = peers_path.read_text(encoding="utf-8")
+    # Passing quality peers are in the Anchor 1 table
+    assert "| `WDH` |" in txt
+    assert "| `HUIZ` |" in txt
+    assert "| `OSCR` |" in txt
+    assert "0.10x (near-zero EV)" in txt
+    # Trash / stale candidates are NOT in the Anchor 1 table, and ARE transparently listed in the filter audit note
+    assert "| `FANH` |" not in txt
+    assert "| `TIRX` |" not in txt
+    assert "| `ZBAO` |" not in txt
+    assert "_Filtered out candidates" in txt
+    assert "`FANH` (stale quote 2024-12-20)" in txt
+    assert "`TIRX` (stale quote 2026-03-13; mcap USD 5.00M" in txt
+    assert "`ZBAO` (mcap USD 3.20M" in txt
+    # Median EV/NOPAT uses WDH (3.84x) and OSCR (12.50x) -> 8.17x (NOT dragged down by HUIZ 0.10x!)
+    assert "**8.17x**" in txt
+
+
+
 
 
 
