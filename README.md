@@ -1,6 +1,6 @@
 # FinancialAdvisor — Equity Research & DeepSeek AI Workbench
 
-A Streamlit + CLI equity research toolkit for personal portfolios (~10 stocks) that combines **SEC EDGAR filings**, **redundant earnings call transcripts (Prepared Remarks + Q&A)**, **free DefeatBeta fundamentals & DCF valuation**, and a **DeepSeek AI Analyst (1M-token context + prompt caching)** into a local Markdown dossier under `data/<TICKER>/`.
+A Streamlit + CLI equity research toolkit for personal portfolios (~10 stocks) that combines **SEC EDGAR filings**, **redundant earnings call transcripts (Prepared Remarks + Q&A)**, **free DefeatBeta fundamentals, peers & valuation packs**, and the editable **V6 USD intrinsic-valuation protocol** run by **DeepSeek AI (1M-token context + prompt caching)** — all assembled into a local Markdown dossier under `data/<TICKER>/`.
 
 ---
 
@@ -22,23 +22,36 @@ Uses a **5-stage quota-preserving waterfall** built for free personal keys:
 | 3 | **[Alpha Vantage](https://www.alphavantage.co/documentation/)** | 25 req/day | Missing quarters since 2010Q1 (speaker + sentiment) |
 | 4 | **[Firecrawl v2](https://docs.firecrawl.dev/features/alexandria)** | 1,000 credits/month | Last-resort web fallback |
 
-### 📈 Fundamentals, Peers & DCF Valuation (100% Free via DefeatBeta)
-- **`CompanyBrief.md`** — deterministic, currency-labelled snapshot (P/E, P/S, P/B, PEG, ROIC/ROE/ROA, WACC, margins, YoY growth, net debt, segment breakdown, next earnings date).
-- **`Peers.md`** — company multiples & returns vs. industry benchmarks.
-- **`Valuation/`** — `dcf_data.json`, `DCF_Summary.md` (with negative-FCF / financial-sector caveats), and an editable live-formula Excel DCF workbook (`<TICKER>_DCF.xlsx`).
+### 📈 Fundamentals, Peers & Valuation Pack (100% Free via DefeatBeta)
+- **`ValuationPack.md`** — protocol-ready extract: USD price, ADS/share-class reconciliation alert, 8 quarters + 4–5 years of statements, 10-year multiple bands, and the Universal-USD FX rule.
+- **`CompanyBrief.md`** — deterministic snapshot (P/E, P/S, P/B, PEG, ROIC/ROE/ROA, margins, YoY growth, net debt, segment breakdown, next earnings date).
+- **`Peers.md`** — **Anchor 1 named peer group**: DeepSeek proposes comparable tickers, then every multiple is fetched deterministically from DefeatBeta (date-stamped, GAAP basis, with peer medians), plus industry-aggregate context and explicit `neg EV` / `neg NOPAT` handling.
+- **`Valuation/`** — `dcf_data.json`, `DCF_Summary.md`, and an editable live-formula Excel DCF workbook (`<TICKER>_DCF.xlsx`), kept as a secondary cross-check.
 
 ### 🧠 DeepSeek AI Equity Analyst (`deepseek-flash` & `deepseek-v4-pro`)
 - Leverages DeepSeek's **1M-token context window** and **prompt caching** (~$0.003/1M cached input tokens off-peak) — no vector database or chunking required.
-- **4 One-Click Institutional Workflows** (saved to `data/<TICKER>/Analysis/`):
-  1. **🎯 DCF vs. Guidance Reality Check** — cross-examines DCF assumptions against verbatim management guidance in transcripts.
-  2. **🕵️ Management Credibility & Promise Tracker** — diffs consecutive quarters to spot delivered promises vs. disappearing KPIs & dodged Q&A.
-  3. **🚩 Red-Flag & Accounting Risk Scanner** — checks GAAP/Non-GAAP gaps, dilution, VIE/governance risks, and peer anomalies.
-  4. **📑 Full Investment Thesis Memo** — synthesizes the entire dossier into a Bull/Base/Bear IC memo.
+- **5 One-Click Institutional Workflows** (saved to `data/<TICKER>/Analysis/`):
+  1. **🧮 5-Year Intrinsic Valuation & Return Model (USD)** — runs the editable **V6 protocol**: forensic baseline, three survival scenarios, `3×3` physics-vs-sentiment grid, catastrophe state, probability-weighted USD IRR, and the 17-point consistency audit.
+  2. **🎯 DCF vs. Guidance Reality Check** — cross-examines DCF assumptions against verbatim management guidance in transcripts.
+  3. **🕵️ Management Credibility & Promise Tracker** — diffs consecutive quarters to spot delivered promises vs. disappearing KPIs & dodged Q&A.
+  4. **🚩 Red-Flag & Accounting Risk Scanner** — checks GAAP/Non-GAAP gaps, dilution, VIE/governance risks, and peer anomalies.
+  5. **📑 Full Investment Thesis Memo** — synthesizes the entire dossier into a Bull/Base/Bear IC memo.
 - **💬 Prompt-Cached Dossier Chat** — ask follow-up questions grounded in attached files with live token & USD cost estimates.
+- **📊 Native KPI cards** — the memo's trailing `valuation-summary-json` block is machine-parsed into four Streamlit metric cards (expected return, `$10,000` proceeds, base target, downside/asymmetry).
+
+### 📐 Protocol V6 — USD Intrinsic Valuation (CAPM/WACC-Free)
+`valuation_protocol.md` is versioned and editable from the UI. Its governing rules:
+
+- **Universal USD policy** — one currency for all comparisons, projections and returns at constant valuation-date spot FX. No investor home currency, no FX forecasts, no FX sensitivity strip.
+- **No CAPM, Beta, WACC or Cost of Equity** — volatility is not permanent capital impairment.
+- **No personal hurdle rate, buy/sell verdict, concentration cap, position sizing or Quarter-Kelly** — the output is a valuation and a return *distribution*, not a recommendation.
+- **Deterministic exit-multiple anchors** — named global peers → company's own 5–10-year band → trailing formula as an economic sanity bound (`r` justified independently, shown at `r ± 200 bps`, never used as a hurdle).
+- **Probability-weighted expected return from the dated USD cash-flow vector** — never an average of scenario IRRs; catastrophe recovery sits at its own event year.
+- **Auditability** — Executive Return Summary first, 17-item self-audit, then a machine-readable JSON block that must reconcile with Phases 3–5.
 
 ### 📦 Portfolio Command Center
 - **Free Preflight** (`Tickers` parallel batch): view upcoming earnings dates and a ticker × quarter coverage matrix *before* spending any API quota.
-- One-click batch downloads for SEC filings, transcripts, and Fundamentals/DCF packs across your watchlist.
+- One-click batch downloads for SEC filings, transcripts, and the full ValuationPack + CompanyBrief + Peers + DCF pack across your watchlist.
 
 ---
 
@@ -80,8 +93,9 @@ All downloads and generated research live under `data/` (gitignored):
 ```text
 data/
 └── <TICKER>/
-    ├── CompanyBrief.md                # Currency-labelled fundamentals & trends
-    ├── Peers.md                       # Company vs. industry multiples
+    ├── ValuationPack.md               # Protocol-ready USD extract: price, ADS check, statements, multiple bands
+    ├── CompanyBrief.md                # Deterministic fundamentals & trend snapshot
+    ├── Peers.md                       # Anchor 1 named peer group + industry aggregate context
     ├── Coverage.md                    # SEC EDGAR index vs. local coverage audit
     ├── Valuation/
     │   ├── dcf_data.json              # Raw DCF assumptions & fair price
@@ -89,7 +103,7 @@ data/
     │   └── <TICKER>_DCF.xlsx          # Editable Excel DCF model
     ├── EarningsTranscripts/           # Speaker-labeled call transcripts (.md)
     ├── DataFromDataMule_markdown/     # Cleaned SEC filings (.md)
-    └── Analysis/                      # Saved DeepSeek AI memos (.md)
+    └── Analysis/                      # Saved DeepSeek memos (.md, ending with valuation-summary-json)
 ```
 
 ---

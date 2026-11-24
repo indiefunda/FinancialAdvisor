@@ -683,8 +683,9 @@ def test_call_deepseek_handles_non_json_and_missing_key():
 
 
 def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
-    # 1. Default valuation_protocol.md (v3) loads cleanly with Universal USD & zero personal hurdle/sizing rules
+    # 1. Default valuation_protocol.md (V6) loads cleanly with Universal USD & zero personal hurdle/sizing rules
     proto = load_valuation_protocol()
+    assert "Protocol V6" in proto
     assert "Universal USD currency policy" in proto
     assert "Executive Return Summary — Output First" in proto
     assert "Do not introduce personal investment objectives" in proto
@@ -693,11 +694,16 @@ def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
     assert "RONIC" in proto
     assert "Phase 6: Mandatory Mathematical & Consistency Audit" in proto
     assert "17. Executive Summary, Phase 3, Phase 4, Phase 5 and `valuation-summary-json` reconcile exactly" in proto
+    # Orientation bug guard: the incremental ratio is revenue-per-capital, never "capital intensity"
+    assert "Incremental Sales-to-Capital" in proto
+    assert "Incremental Capital Intensity" not in proto
+    assert "Recourse rule" in proto
+    assert "-100%" in proto
 
     assert "NEVER use CAPM, Beta, or WACC" in SYSTEM_PROMPT_VALUATION_CHAT
     assert "valuation-summary-json" not in SYSTEM_PROMPT_VALUATION_CHAT
 
-    # Trailing JSON summary (v3 placement after Phase 6) parses & strips cleanly
+    # Trailing JSON summary (V6 placement: after Phase 6) parses & strips cleanly
     sample_md = (
         "# Executive Return Summary\nBody text.\n\n"
         '<!-- valuation-summary-json {"valuation_date":"2026-11-24","ticker":"YB","current_price_usd":10.61,'

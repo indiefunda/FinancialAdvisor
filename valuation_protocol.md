@@ -1,5 +1,5 @@
 # Scientific 5-Year Equity Valuation & Probability-Weighted Return Protocol
-## Advanced Fundamental Valuation — USD-Based, CAPM/WACC-Free Framework
+## Protocol V6 — Advanced Fundamental Valuation, USD-Based, CAPM/WACC-Free Framework
 
 # 1. Role, Mandate & Objective
 
@@ -270,7 +270,7 @@ Negative excess cash remains negative and is not eligible for a cash haircut.
 
 Never include lease liabilities in debt while simultaneously leaving the corresponding lease expense inside operating earnings without adjustment.
 
-## 1.6 Historical invested capital and capital intensity
+## 1.6 Historical invested capital, Sales-to-Capital and incremental Sales-to-Capital
 
 Establish whether the reported equity line is Parent Stockholders' Equity or consolidated Total Equity.
 
@@ -288,10 +288,10 @@ $$
 \text{Sales-to-Capital} = \frac{\text{TTM Revenue}}{\text{Average Invested Capital}}
 $$
 
-Also calculate 3-year incremental capital intensity:
+Also calculate the 3-year **incremental Sales-to-Capital** ratio, on the same orientation as the historical ratio above — revenue per unit of incremental capital. It is the reciprocal of capital intensity, and it must never be inverted to capital ÷ revenue:
 
 $$
-\text{Incremental Capital Intensity} = \frac{\Delta \text{Revenue}}{\sum(\text{CapEx} - \text{D\&A} + \Delta \text{NWC} + \text{Cash Acquisitions})}
+\text{Incremental Sales-to-Capital} = \frac{\Delta \text{Revenue}}{\sum(\text{CapEx} - \text{D\&A} + \Delta \text{NWC} + \text{Cash Acquisitions})}
 $$
 
 If invested capital or incremental reinvestment is negative or near zero due to negative working capital, explain this explicitly.
@@ -317,6 +317,8 @@ $$
 $$
 
 This measures the number of years of zero-growth unlevered owner earnings required to equal today's enterprise value.
+
+This is a pre-dilution diagnostic. Under the non-GAAP SBC convention it does not capture the share dilution that offsets the SBC add-back, so do not read it as a per-share return measure, and do not feed it into the Phase 3–5 IRR calculations.
 
 ## 1.8 Reverse valuation: break-even growth
 
@@ -488,7 +490,7 @@ Use Phase 1 normalized tax assumptions unless a clearly justified change is fore
 
 ## 3.4 Reinvestment tied to revenue expansion
 
-Anchor Sales-to-Capital directly to Phase 1 filing-derived historical and incremental ratios.
+Anchor Sales-to-Capital directly to Phase 1 filing-derived historical and incremental Sales-to-Capital ratios. Both are expressed as revenue per unit of capital (the reciprocal of capital intensity); never invert them inside the reinvestment formula.
 
 $$
 \text{Reinvestment}_t = \frac{\max(\text{Revenue}_{t+1} - \text{Revenue}_t,\ 0)}{\text{Sales-to-Capital}}
@@ -813,6 +815,8 @@ Recoverable non-domestic assets must exclude cash already included separately.
 
 Senior claims include applicable debt, NCI, preferred shares and other documented senior claims.
 
+**Recourse rule:** deduct only claims that have legal recourse to the offshore cash and non-domestic assets being recovered. Where operations sit in onshore or regulated subsidiaries and the debt is non-recourse to the offshore holding company, the onshore debt is already reflected in the recoverable value of those operating assets (floored at zero) and must not be deducted a second time from offshore cash. State explicitly which claims are recourse and which are not.
+
 Calculate actual recovery from the available evidence and explicit assumptions.
 
 Do not assume automatic 100% equity loss.
@@ -851,6 +855,8 @@ $$
 For Catastrophe, place recovery at $t_{\text{cat}}$ after prior dividends, with zero subsequent cash flows.
 
 Calculate true dated-cash-flow IRR for each scenario.
+
+If a scenario's terminal recovery and all interim dividends are zero, its cash-flow vector has no positive cash flow and the IRR is undefined. Report that scenario's IRR as exactly `-100%` rather than attempting a solve or emitting an error value.
 
 Net dividends must deduct:
 
@@ -1045,7 +1051,7 @@ Before finalizing, verify every calculation.
 | 7. Cash haircut applies only to positive excess cash; shortfalls, debt, NCI and preferred shares are deducted at 100% | PASS/FAIL | |
 | 8. Lease treatment is consistent across EBIT, Invested Capital and Debt | PASS/FAIL | |
 | 9. SBC convention matches Phase 1 owner earnings, Phase 3 diluted shares and peer multiples | PASS/FAIL | |
-| 10. Sales-to-Capital is filing-anchored; reinvestment is non-negative unless explicitly documented otherwise | PASS/FAIL | |
+| 10. Sales-to-Capital is filing-anchored and oriented as revenue per unit of capital (the incremental ratio is never inverted); reinvestment is non-negative unless explicitly documented otherwise | PASS/FAIL | |
 | 11. Buybacks are capped at executed historical pace and use the one-pass price calculation | PASS/FAIL | |
 | 12. Exit multiple follows Anchor 1 → Anchor 2 → Formula; deviations above 20% are explained | PASS/FAIL | |
 | 13. All nine $3 \times 3$ cross-grid cells reconcile; center cell equals the Base Case IRR | PASS/FAIL | |
