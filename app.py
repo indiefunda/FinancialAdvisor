@@ -503,7 +503,12 @@ with tab_ai:
     with a2:
         if picked == "➕ Enter new ticker...":
             raw_new_tk = st.text_input("New Ticker Symbol", value="HUIZ", key="ai_new_ticker")
-            ai_ticker = sanitize_ticker(raw_new_tk) if raw_new_tk.strip() else ""
+            ai_ticker = ""
+            if raw_new_tk.strip():
+                try:
+                    ai_ticker = sanitize_ticker(raw_new_tk)
+                except ValueError as exc:
+                    st.error(str(exc))
         else:
             ai_ticker = picked
             st.text_input("Active Ticker", value=ai_ticker, disabled=True, key="ai_active_ticker_ro")

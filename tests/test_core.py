@@ -761,7 +761,8 @@ def test_deepseek_never_returns_thoughts_as_final_answer_and_streams_cleanly():
 
 def test_generate_valuation_pack_and_spot_fx(tmp_path: Path):
     mock_t = _make_mock_ticker(sector="Technology", currency="CNY", base_fcf=50_000_000.0)
-    mock_t.price.return_value = _FakeDF([{"report_date": "2026-11-23", "close": 4.85}])
+    # Market Cap = 350M USD, Close Price = 3.50 USD => Implied Tradable / ADS Shares = 100.00M
+    mock_t.price.return_value = _FakeDF([{"report_date": "2026-11-23", "close": 3.50}])
 
     class _FakeStatement:
         def __init__(self, df):
@@ -773,13 +774,18 @@ def test_generate_valuation_pack_and_spot_fx(tmp_path: Path):
     mock_t.quarterly_income_statement.return_value = _FakeStatement(_FakeDF([
         {"Breakdown": "Total Revenue", "2026-09-30": 350_000_000, "2026-06-30": 320_000_000},
         {"Breakdown": "Operating Income", "2026-09-30": 42_000_000, "2026-06-30": 38_000_000},
+        {"Breakdown": "Net Income Continuous Operations", "2026-09-30": 35_400_000, "2026-06-30": 31_000_000},
+        {"Breakdown": "Net Income(Attributable to Parent Company Shareholders)", "2026-09-30": 40_400_000, "2026-06-30": 36_000_000},
+        {"Breakdown": "Diluted Average Shares", "2026-09-30": 100_000_000, "2026-06-30": 100_000_000},
     ]))
     mock_t.annual_income_statement.return_value = _FakeStatement(_FakeDF([
         {"Breakdown": "Total Revenue", "2025-12-31": 1_200_000_000, "2024-12-31": 1_050_000_000},
     ]))
+    # Ordinary Shares = 10B vs 100M ADS => 100:1 ADS ratio warning MUST trigger!
     mock_t.quarterly_balance_sheet.return_value = _FakeStatement(_FakeDF([
         {"Breakdown": "Cash And Cash Equivalents", "2026-09-30": 400_000_000},
         {"Breakdown": "Stockholders Equity", "2026-09-30": 750_000_000},
+        {"Breakdown": "Ordinary Shares Number", "2026-09-30": 10_000_000_000},
     ]))
     mock_t.annual_balance_sheet.return_value = _FakeStatement(_FakeDF([]))
     mock_t.annual_cash_flow.return_value = _FakeStatement(_FakeDF([
@@ -798,11 +804,19 @@ def test_generate_valuation_pack_and_spot_fx(tmp_path: Path):
     assert id_rate == 1.0
 
     vp = generate_valuation_pack("HUIZ", home_currency="USD", data_root=tmp_path, ticker_obj=mock_t, fx_session=fx_session)
-    assert vp.latest_price == 4.85
+    assert vp.latest_price == 3.50
     assert vp.fx_rate == 0.1385
     vp_text = vp.path.read_text(encoding="utf-8")
     assert "`[Market Data: DefeatBeta, 2026-11-23]`" in vp_text
     assert "`[Market Data: ECB/Frankfurter, 2026-11-23]`" in vp_text
+    assert "| Implied Shares Outstanding (Tradable / ADS Basis) | 100.00M |" in vp_text
+    assert "ADS / Share-Class Ratio Alert" in vp_text
+    assert "~100:1" in vp_text
+    # Word-boundary regex regressions ("ratio" in "operations", "share" in "shareholders")
+    assert "Net Income Continuous Operations | CNY 35.40M | CNY 31.00M" in vp_text
+    assert "Net Income(Attributable to Parent Company Shareholders) | CNY 40.40M | CNY 36.00M" in vp_text
+    assert "Diluted Average Shares | 100.00M | 100.00M" in vp_text
+    assert "Ordinary Shares Number | 10.00B" in vp_text
     assert "Total Revenue | CNY 350.00M | CNY 320.00M" in vp_text
     assert "Cash And Cash Equivalents | CNY 400.00M" in vp_text
     assert "Repurchase Of Capital Stock | CNY -15.00M" in vp_text

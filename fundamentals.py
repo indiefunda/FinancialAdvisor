@@ -1069,6 +1069,9 @@ def _extract_statement_df(obj: Any) -> Any:
     return obj
 
 
+_NON_CURRENCY_LINE_RE = re.compile(r"\b(shares?|eps|ratio)\b", re.IGNORECASE)
+
+
 def _format_statement_table(
     raw_obj: Any,
     wanted_rows: Sequence[str],
@@ -1105,6 +1108,7 @@ def _format_statement_table(
             continue
         seen_labels.add(low)
 
+        is_non_currency = bool(_NON_CURRENCY_LINE_RE.search(raw_label))
         vals: List[str] = []
         has_any = False
         for pc in period_cols:
@@ -1115,7 +1119,7 @@ def _format_statement_table(
                 try:
                     fv = float(str(v).replace(",", ""))
                     has_any = True
-                    if "share" in low or "eps" in low or "ratio" in low:
+                    if is_non_currency:
                         vals.append(_fmt_money(fv) if abs(fv) >= 1_000 else _fmt_num(fv, 2))
                     else:
                         vals.append(_fmt_money(fv, currency))
@@ -1134,6 +1138,32 @@ def _format_statement_table(
     for lbl, vals in matched_rows:
         lines.append(f"| {lbl} | " + " | ".join(vals) + " |")
     return lines
+
+
+def _extract_latest_row_value(raw_obj: Any, row_keyword: str) -> Optional[float]:
+    """Extract the most recent numeric value for a specific line item from a DefeatBeta statement."""
+    df = _extract_statement_df(raw_obj)
+    if _df_is_empty(df):
+        return None
+    cols = list(df.columns)
+    if not cols:
+        return None
+    label_col = cols[0] if str(cols[0]).lower() in ("breakdown", "item", "metric", "line_item") else None
+    period_cols = [c for c in cols if c != label_col]
+    kw = row_keyword.lower()
+    for idx, row in df.iterrows():
+        raw_label = str(row[label_col] if label_col is not None else idx).strip().lower()
+        if kw not in raw_label:
+            continue
+        for pc in period_cols:
+            v = row.get(pc)
+            if _is_nan(v) or str(v).strip() in ("", "*", "None", "nan"):
+                continue
+            try:
+                return float(str(v).replace(",", ""))
+            except (TypeError, ValueError):
+                continue
+    return None
 
 
 def _compute_multiple_band(df: Any, preferred_cols: Sequence[str], min_year: int) -> Optional[Tuple[int, float, float, float, float, float]]:
@@ -1213,6 +1243,27 @@ def generate_valuation_pack(
     q_cf = _safe_call(t, "quarterly_cash_flow")
     a_cf = _safe_call(t, "annual_cash_flow")
 
+    implied_tradable_shares: Optional[float] = None
+    if mcap_val is not None and price_val is not None and mcap_val > 0 and price_val > 0:
+        implied_tradable_shares = mcap_val / price_val
+
+    ord_shares = (
+        _extract_latest_row_value(q_bs, "ordinary shares number")
+        or _extract_latest_row_value(a_bs, "ordinary shares number")
+    )
+    ads_ratio_warning = ""
+    if implied_tradable_shares and ord_shares and ord_shares / implied_tradable_shares >= 1.5:
+        ratio_est = round(ord_shares / implied_tradable_shares)
+        ads_ratio_warning = (
+            f"> [!WARNING]\n"
+            f"> **ADS / Share-Class Ratio Alert:** Balance-sheet `Ordinary Shares Number` "
+            f"({_fmt_money(ord_shares)}) is **~{ratio_est}:1** vs. implied tradable shares "
+            f"(`Market Cap / Price = {_fmt_money(implied_tradable_shares)}`). "
+            f"Verify the exact `1 ADS = N Ordinary Shares` conversion ratio in the latest `20-F`/`6-K` "
+            f"and ALWAYS divide terminal equity by the **tradable / ADS share count** ({_fmt_money(implied_tradable_shares)}), "
+            f"never raw ordinary shares.\n"
+        )
+
     inc_keywords = (
         "total revenue", "gross profit", "operating income", "ebit", "net interest",
         "interest income", "interest expense", "pretax income", "tax provision",
@@ -1222,8 +1273,9 @@ def generate_valuation_pack(
     bs_keywords = (
         "cash and cash equivalents", "cash cash equivalents", "other short term investments",
         "restricted cash", "investments and advances", "long term equity investment",
-        "total debt", "long term debt", "current debt", "lease",
-        "minority interest", "preferred stock", "stockholders equity",
+        "total assets", "total liabilities", "total debt", "long term debt", "current debt",
+        "lease", "minority interest", "preferred stock", "stockholders equity",
+        "common stock equity", "tangible book value",
         "total equity gross minority interest", "ordinary shares number", "share issued",
     )
     cf_keywords = (
@@ -1243,7 +1295,8 @@ def generate_valuation_pack(
         "",
         "| Field | Value | Source Tag |",
         "| :--- | ---: | :--- |",
-        f"| Latest Close Price (Listing CCY) | {_fmt_num(price_val, 2) if price_val is not None else 'not provided'} | `[Market Data: DefeatBeta, {price_dt or 'n/a'}]` |",
+        f"| Latest Close Price (Listing / ADS CCY) | {_fmt_num(price_val, 2) if price_val is not None else 'not provided'} | `[Market Data: DefeatBeta, {price_dt or 'n/a'}]` |",
+        f"| Implied Shares Outstanding (Tradable / ADS Basis) | {_fmt_money(implied_tradable_shares) if implied_tradable_shares is not None else 'not provided'} | `[Derived: Market Cap / Close Price]` |",
         f"| Spot FX (`1 {currency} -> {home_ccy}`) | {f'{fx_rate:.6f}' if fx_rate is not None else 'not provided'} | `[Market Data: {fx_src or 'unavailable'}, {fx_dt or 'n/a'}]` |",
         f"| Market Cap (USD) | {_fmt_money(mcap_val, 'USD')} | `[Market Data: DefeatBeta, {mcap_dt or 'n/a'}]` |",
         f"| Enterprise Value (USD) | {_fmt_money(ev_val, 'USD')} | `[Market Data: DefeatBeta, {mcap_dt or 'n/a'}]` |",
@@ -1252,6 +1305,8 @@ def generate_valuation_pack(
         f"| Price / Sales (P/S) | {_fmt_num(ps_val, 2, 'x')} | `[Market Data: DefeatBeta, {mcap_dt or 'n/a'}]` |",
         "",
     ]
+    if ads_ratio_warning:
+        lines.extend([ads_ratio_warning])
 
     # Section 2: Historical 5-10Y Multiple Band (Anchor 2)
     min_yr = date.today().year - 10
