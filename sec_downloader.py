@@ -173,6 +173,19 @@ def _extract_year(period: str, filing_date: str) -> int:
     return 0
 
 
+def is_within_filing_window(filing_date: str, period: str, cutoff_year: int) -> bool:
+    """Return True when a submission belongs in the requested *filing* window.
+
+    The window must be judged on the FILING date — the same basis as the
+    `filing_date=(start, end)` filter handed to `datamule` — and never on the
+    fiscal period end. Annual reports are structurally affected: a 20-F/10-K for
+    fiscal year N is normally filed in year N+1, so a period-year test would drop
+    the most recent annual report from every window (and drop it entirely for a
+    1-year window). The period year is still used for filename labels.
+    """
+    return _extract_year(filing_date, period) >= cutoff_year
+
+
 def make_sec_filename(
     ticker: str,
     sub_type: str,
@@ -357,8 +370,10 @@ def download_and_convert_sec_filings(
             or ""
         ).strip()
 
-        # Filter by year BEFORE parsing markdown (huge speed win)
-        if _extract_year(period, filing_date) < cutoff_year:
+        # Window filter BEFORE parsing markdown (huge speed win). Judged on the
+        # filing date, matching the download window: a 20-F for FY2025 filed in
+        # 2026 must survive even when `num_years=1` puts the cutoff at 2026.
+        if not is_within_filing_window(filing_date, period, cutoff_year):
             continue
 
         result.submissions_found += 1

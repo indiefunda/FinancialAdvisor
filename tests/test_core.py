@@ -44,6 +44,7 @@ from sec_downloader import (
     deduplicate_filename,
     download_and_convert_sec_filings,
     is_useful_document,
+    is_within_filing_window,
     make_sec_filename,
     sanitize_ticker,
 )
@@ -210,6 +211,27 @@ def test_make_sec_filename_no_exhibit_collision_and_non_calendar_10q():
     used = set()
     assert deduplicate_filename("AAPL - 8-K 2026-05-01.md", used) == "AAPL - 8-K 2026-05-01.md"
     assert deduplicate_filename("AAPL - 8-K 2026-05-01.md", used) == "AAPL - 8-K 2026-05-01 (2).md"
+
+
+def test_filing_window_uses_filing_date_not_fiscal_period():
+    """Regression: a 20-F for FY2025 filed 2026-04-30 must survive a 1-year window.
+
+    The old filter compared the *period* year (2025) against the cutoff (2026) and
+    silently dropped the most recent annual report from every window.
+    """
+    # Annual report: period 2025-12-31, filed 2026-04-30, 1-year window (cutoff 2026)
+    assert is_within_filing_window("20260430", "20251231", 2026) is True
+    # ...and it still belongs to a 2-year window
+    assert is_within_filing_window("20260430", "20251231", 2025) is True
+    # Prior-year annual report is genuinely outside a 1-year window
+    assert is_within_filing_window("20250430", "20241231", 2026) is False
+    # Quarterly/current filings keep working on filing date
+    assert is_within_filing_window("20260910", "20260630", 2026) is True
+    # Falls back to the period when the filing date is missing/blank
+    assert is_within_filing_window("", "20251231", 2025) is True
+    assert is_within_filing_window("", "20241231", 2025) is False
+    # Nothing parseable -> excluded rather than crashing
+    assert is_within_filing_window("", "", 2025) is False
 
 
 def test_missing_datamule_raises_clean_runtime_error(tmp_path: Path):
