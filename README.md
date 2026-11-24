@@ -1,117 +1,89 @@
-# SEC Data Downloader
+# FinancialAdvisor — SEC Filings & Earnings Transcripts Downloader
 
-A Streamlit-powered tool to download **SEC filings** and **earnings call transcripts** for any public company, convert them to clean Markdown, and feed them into AI analysis tools like Cherry Studio.
+A Streamlit + CLI toolkit to download **SEC EDGAR filings** and **earnings call transcripts (Prepared Remarks + Q&A)** for your portfolio, convert them into clean, LLM-ready Markdown, and feed them into AI research tools (Cherry Studio, Claude, ReAct agents, etc.).
 
 ---
 
 ## Features
 
-### 📄 SEC Financial Documents
-- Download annual reports (**10-K**, **20-F**), quarterly reports (**10-Q**), current/earnings reports (**6-K**, **8-K**), IPO registration statements (**F-1**, **S-1**), shelf registrations (**F-3**, **S-3**, **F-4**, **S-4**), and prospectuses (**424B1–424B4**).
-- **Smart filtering** — automatically skips junk documents (XBRL taxonomies, SOX certifications, legal opinions, voting agreements, subsidiary lists, employment contracts, etc.).
-- **IPO deduplication** — for amended registration statements (F-1/A, S-1/A), only the latest version is kept.
-- **Descriptive filenames** — e.g. `AAPL - 10-K FY 2024.md`, `YB - Q2 2025.md`, `HUIZ - Earnings Release 2025-03-15.md`.
-- **Markdown conversion** — every document is converted to clean, readable Markdown via the [datamule](https://pypi.org/project/datamule/) library.
-- **Year range control** — choose how many recent years to include (default: 2, max: 30).
+### 📄 SEC EDGAR Filings
+- Downloads annual reports (**10-K**, **20-F**, amendments), quarterly reports (**10-Q**), current/earnings releases (**6-K**, **8-K**), proxy statements (**DEF 14A**), IPO/shelf registrations (**F-1/S-1/F-3/S-3/F-4/S-4**), prospectuses (**424B1–424B4**), and custom form types.
+- **Date-range filtering at download time** — passes `filing_date` directly to `datamule` so you only download the years you ask for.
+- **Smart exhibit filtering & IPO deduplication** — skips XBRL/SOX/legal boilerplate while preserving all `EX-99.x` earnings releases without filename collisions.
+- **Clean Markdown tables** — automatically strips SEC's duplicate dollar-column and spacer-column artifacts without losing data.
 
-### 🎙️ Earnings Call Transcripts
-- Scrapes transcripts from [discountingcashflows.com](https://discountingcashflows.com) (free, no API key needed).
-- Uses **Playwright** to automate the browser — handles WAF challenges automatically.
-- **Cookie persistence** — only need to solve CAPTCHA once; cookies are saved for future runs.
-- **Year range control** — same year selector applies to transcripts as well.
-- Output is cleaned (excessive whitespace removed) and saved as Markdown files.
+### 🎙️ Redundant Earnings Call Transcripts (No Scraping / No Playwright)
+Uses a **4-tier, quota-preserving waterfall** built for free personal API keys:
 
-### 📁 Output Structure
-All data is saved under the script's directory, organized by ticker:
+| Priority | Provider | Free Tier | Role |
+|---|---|---|---|
+| 0 | **Local Disk Cache** | Unlimited | Skips quarters already saved (`0` API calls) |
+| 1 | **[`defeatbeta-api`](https://pypi.org/project/defeatbeta-api/)** (Hugging Face) | Unlimited, no key | Bulk historical backfill (10+ years, speaker-labeled) |
+| 2 | **[ROIC.ai API v3](https://www.roic.ai/api/docs/earnings-calls)** | 5 req/min, latest 2 calls | Fast coverage (~1h after call) for newest quarters |
+| 3 | **[Alpha Vantage](https://www.alphavantage.co/documentation/)** | 25 req/day | Any missing quarter since 2010Q1 (speaker + sentiment) |
+| 4 | **[Firecrawl v2](https://docs.firecrawl.dev/features/alexandria)** | 1,000 credits/month | Last-resort fallback if the first 3 miss a quarter |
 
-```
-<repo-root>/
-├── <TICKER>/
-│   ├── DataFromDataMule/              # Raw SEC filing data
-│   ├── DataFromDataMule_markdown/     # Converted SEC filings (.md)
-│   └── EarningsTranscripts/           # Earnings call transcripts (.md)
-```
+### 📦 Portfolio Batch Mode & File Browser
+- Paste your watchlist (e.g., a 10-stock portfolio) and download SEC filings + transcripts in one click while respecting free-tier rate limits.
+- Preview and download generated Markdown files directly in the Streamlit UI.
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-- **Python 3.10+** installed on your system ([python.org](https://www.python.org/downloads/))
-- Windows (the `start.bat` is Windows-native; Linux/Mac users can run the Python commands manually)
-
-### One-Click Launch (Windows)
-1. Clone or download this repository.
-2. Double-click **`start.bat`**.
-3. The script will:
-   - Install all Python dependencies (`pip install -r requirements.txt`)
-   - Download the Playwright Chromium browser engine
-   - Launch the Streamlit app in your browser at `http://localhost:8501`
+### Windows (One-Click)
+Double-click **`start.bat`**. It creates an isolated `.venv`, installs dependencies, and opens the app at `http://localhost:8501`.
 
 ### Manual Launch (Any OS)
 ```bash
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-playwright install chromium
 streamlit run app.py
 ```
 
 ---
 
-## Usage
+## Configuring API Keys (Local & Gitignored)
 
-### Download SEC Filings
-1. Select the **form types** you want (default: 20-F, 10-K, 10-Q, 6-K, 8-K).
-2. Optionally add custom form types in the text field.
-3. Enter a **stock ticker** (e.g., `AAPL`, `YB`, `HUIZ`).
-4. Set the **years of history** (1 = current year only, 2 = current + last year, etc.).
-5. Click **"Download & Convert to Markdown"**.
-6. Wait for the status to complete — files appear in `DataFromDataMule_markdown/`.
+API keys are stored locally in `.secrets.json` (which is **gitignored** and never committed):
 
-### Download Earnings Transcripts
-1. Enter or confirm the **ticker** in the transcripts section.
-2. Click **"Download Earnings Transcripts"**.
-3. A browser window will open. On first run, you may see a WAF security challenge — wait for it to resolve automatically, or click "Verify" if needed.
-4. Cookies are saved after the first run; subsequent runs will be silent.
-5. Transcripts appear in `EarningsTranscripts/`.
-
-### Standalone Scripts
-- **`download_data.py`** — CLI version of the SEC downloader. Edit the `TICKER` and `SUBMISSION_TYPES` at the top of the file, then run:
-  ```bash
-  python download_data.py
-  ```
-- **`scrape_transcripts.py`** — CLI transcript scraper:
-  ```bash
-  python scrape_transcripts.py AAPL 2
-  ```
-  Second argument is the number of years (optional, defaults to all).
+- **Via UI:** Open the sidebar → **🔑 Add / Update API Keys** → paste keys → **Save API Keys**.
+- **Via Environment Variables:** `ROIC_API_KEY`, `ALPHAVANTAGE_API_KEY`, `FIRECRAWL_API_KEY`.
+- **Via `Secrets.txt`:** If a local gitignored `Secrets.txt` exists in the repo root, keys are auto-imported into `.secrets.json` on first run.
 
 ---
 
-## Files
+## CLI Usage
 
-| File | Purpose |
-|---|---|
-| `app.py` | Main Streamlit UI — SEC downloader + transcript downloader |
-| `download_data.py` | Standalone CLI script for SEC filings (edit ticker at top) |
-| `scrape_transcripts.py` | Standalone CLI script for earnings transcripts |
-| `markdown_cleanup.py` | Table cleanup utility used by the SEC converter |
-| `requirements.txt` | Python package dependencies |
-| `start.bat` | One-click launcher for Windows (installs deps + runs app) |
-| `.gitignore` | Ignores `__pycache__`, `.cookies.json`, build artifacts, etc. |
+```bash
+# Download SEC filings (default: last 2 years)
+python download_data.py AAPL 2
+python download_data.py YB 3 --forms 20-F,6-K,F-1
 
----
-
-## Integration with Cherry Studio / AI Tools
-
-This tool pairs well with the [local_rag.py / api_server.py](https://github.com/kamathhrishi/finance-agent) ReAct agent setup:
-
-1. Download filings/transcripts for a ticker using this app.
-2. Point the ReAct agent to the ticker's folder.
-3. The LLM can then `ls`, `grep`, and `read_file` to answer questions — no chunking or vector DB needed.
+# Download earnings call transcripts using the redundant waterfall
+python scrape_transcripts.py AAPL 2
+python scrape_transcripts.py YB 2 --providers defeatbeta,roic,alphavantage
+```
 
 ---
 
-## Notes
-- **SEC API rate limits**: The datamule library handles this gracefully. If a form type doesn't exist for a company, it's silently skipped.
-- **Transcript source**: discountingcashflows.com is free for personal use. Respect their terms.
-- **No API keys required**: Everything works with free, public data sources.
+## Output Structure
+
+All downloads live under `data/` (gitignored):
+
+```text
+data/
+└── <TICKER>/
+    ├── DataFromDataMule/              # Raw SEC EDGAR submissions
+    ├── DataFromDataMule_markdown/     # Cleaned SEC filings (.md)
+    └── EarningsTranscripts/           # Earnings call transcripts (.md)
+```
+
+---
+
+## Running Tests
+
+```bash
+pytest -v
+```

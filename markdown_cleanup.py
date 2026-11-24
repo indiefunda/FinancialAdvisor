@@ -1,265 +1,188 @@
 # ============================================================
 # Markdown Table Cleanup Utility
 # ============================================================
-# SEC filings often have badly formatted tables in their
-# Markdown conversion. This script cleans them up by removing
-# duplicate columns.
+# SEC filings often produce messy tables when converted to
+# Markdown:
+#   1) Duplicate adjacent value columns: "| $1,234 | 1,234 |"
+#   2) Standalone currency/punctuation spacer columns:
+#      "| $ | 1,234 |" or "| (1,234 | ) |"
 #
-# Why duplicate columns?
-#   The datamule library sometimes converts table cells twice —
-#   e.g. "$1,234 | $1,234" instead of just "$1,234".
-#   This happens because SEC HTML tables sometimes have
-#   overlapping/merged cells that get expanded twice.
-#
-# This script detects when two adjacent columns have nearly
-# identical data and removes the duplicate.
-#
-# LIBRARIES USED:
-#   - re  → regular expressions for pattern matching
-#   - typing → type hints (List[str] means "a list of strings")
+# This module detects and removes duplicate or currency-only
+# spacer columns while preserving all real financial data and
+# keeping Markdown separator rows valid.
 # ============================================================
 
 from __future__ import annotations
 
 import re
-from typing import List
-
-
-# ── Regex patterns ─────────────────────────────────────────────────
+from typing import List, Optional
 
 # Matches lines that look like Markdown table rows: | cell | cell |
 _TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
 
-# Matches separator rows: | :--- | :---: | ---: |
-_SEPARATOR_RE = re.compile(r"^\s*\|(?:\s*:?-+:?\s*\|)+\s*$")
+# Matches cells that contain only currency/punctuation symbols or whitespace
+_DECORATION_ONLY_RE = re.compile(r"^\s*[\$€£¥\(\)%\-\—\–]*\s*$")
+_HAS_CURRENCY_OR_PAREN_RE = re.compile(r"[\$€£¥\(\)%]")
 
-# Matches cells that are just a dollar sign, possibly with spaces
-_CURRENCY_ONLY_RE = re.compile(r"^\s*\$?\s*$")
-
-
-# ============================================================
-# HELPER FUNCTIONS
-# ============================================================
 
 def _split_row(line: str) -> List[str]:
-    """
-    Split a Markdown table row into individual cells.
-    
-    Example:
-      "| A | B | C |"  →  ["A", "B", "C"]
-    
-    If the line isn't a proper table row, return it as-is in a list.
-    """
+    """Split a Markdown table row into individual cells."""
     raw = line.strip()
     if not raw.startswith("|") or not raw.endswith("|"):
         return [line]
-    # Remove the outer pipes, then split by "|"
-    inner = raw[1:-1]
-    return inner.split("|")
+    return raw[1:-1].split("|")
 
 
 def _join_row(cells: List[str]) -> str:
-    """
-    Join cells back into a Markdown table row.
-    
-    Example:
-      ["A", "B", "C"]  →  "| A | B | C |"
-    """
+    """Join cells back into a Markdown table row."""
     return "| " + " | ".join(c.strip() for c in cells) + " |"
 
 
 def _is_separator_row(cells: List[str]) -> bool:
-    """
-    Check if a row is a Markdown table separator (the |---| line).
-    
-    Example: | :--- | :---: | ---: |
-    """
+    """Return True if a row is a Markdown table separator (e.g., | :--- | ---: |)."""
     if not cells:
         return False
-    return all(re.fullmatch(r"\s*:?-+:?\s*", c) for c in cells)
+    return all(re.fullmatch(r"\s*:?-+:?\s*", c) is not None for c in cells)
 
 
-def _looks_currency_or_empty(cell: str) -> bool:
+def _is_empty_or_decoration(cell: str) -> bool:
+    """Return True if a cell is empty or only currency/parenthesis punctuation."""
+    return bool(_DECORATION_ONLY_RE.match(cell))
+
+
+def _column_is_currency_spacer(col: List[str]) -> bool:
+    """Return True if a column contains ONLY currency/paren placeholders and blanks
+    (with at least one actual currency/paren symbol, so sparse text columns like
+    'Notes' are never falsely dropped).
     """
-    Check if a cell is just a currency symbol or empty.
-    
-    Some SEC tables have cells with just "$" or "(" or ")" 
-    as placeholders for formatting. We treat these as empty.
-    """
-    return bool(_CURRENCY_ONLY_RE.match(cell))
+    has_symbol = False
+    for cell in col:
+        stripped = cell.strip()
+        if not stripped:
+            continue
+        if _HAS_CURRENCY_OR_PAREN_RE.search(stripped) and _is_empty_or_decoration(stripped):
+            has_symbol = True
+        else:
+            return False
+    return has_symbol
 
 
-def _strip_dollar(cell: str) -> str:
-    """
-    Remove leading dollar sign and spaces from a cell.
-    
-    Example: "  $  1,234"  →  "1,234"
-    """
-    return re.sub(r"^\s*\$\s*", "", cell.strip())
+def _choose_column_to_drop(left_cells: List[str], right_cells: List[str]) -> Optional[str]:
+    """Compare two adjacent data columns (excluding separator rows).
 
-
-def _columns_equivalent(left_cells: List[str], right_cells: List[str]) -> bool:
-    """
-    Check if two adjacent columns contain essentially the same data.
-    
-    This is the core detection logic. Two columns are "equivalent"
-    if most of their data rows have the same values (with some
-    allowance for currency symbols and formatting differences).
-    
-    Example of duplicate columns:
-      | $1,234 | 1,234 |   ← both have the same number
-      | $5,678 | 5,678 |
-    
-    Returns True if they're duplicates (one should be removed).
+    Returns:
+      - "left"  if the left column should be dropped
+      - "right" if the right column should be dropped
+      - None    if both columns carry distinct data and must be kept
     """
     if len(left_cells) != len(right_cells) or not left_cells:
-        return False
+        return None
 
-    n_data_rows = 0       # how many rows have actual data
-    n_dup_pattern = 0     # how many rows look like duplicates
-    n_value_rows = 0      # rows where at least one side has a value
+    # Case 1: One column is purely a currency/punctuation spacer (e.g. "$" or ")")
+    # next to a column with real data — always drop the spacer, NEVER the data!
+    left_is_spacer = _column_is_currency_spacer(left_cells)
+    right_is_spacer = _column_is_currency_spacer(right_cells)
+    if left_is_spacer and not right_is_spacer:
+        return "left"
+    if right_is_spacer and not left_is_spacer:
+        return "right"
 
-    for L, R in zip(left_cells, right_cells):
-        L_strip = L.strip()
-        R_strip = R.strip()
-        if not L_strip and not R_strip:
-            continue       # skip rows where both sides are empty
+    # Case 2: Both columns contain near-identical values (e.g. "$1,234" vs "1,234")
+    n_data_rows = 0
+    n_same = 0
+    left_nonempty = 0
+    right_nonempty = 0
+
+    for left, right in zip(left_cells, right_cells):
+        l_strip = left.strip()
+        r_strip = right.strip()
+        if not l_strip and not r_strip:
+            continue
         n_data_rows += 1
+        if l_strip and not _is_empty_or_decoration(l_strip):
+            left_nonempty += 1
+        if r_strip and not _is_empty_or_decoration(r_strip):
+            right_nonempty += 1
 
-        # Remove currency symbols and parentheses for comparison
-        Ls = re.sub(r"[()$\s]+", "", L_strip)
-        Rs = re.sub(r"[()$\s]+", "", R_strip)
-        is_value = bool(Rs or Ls)
-        if is_value:
-            n_value_rows += 1
+        l_norm = re.sub(r"[()\$€£¥,\s]+", "", l_strip)
+        r_norm = re.sub(r"[()\$€£¥,\s]+", "", r_strip)
+        if l_norm and r_norm and l_norm == r_norm:
+            n_same += 1
 
-        same_after_strip = (Ls == Rs and is_value)
-        
-        # Handle cases where one column has "$" and the other has the number
-        left_currency_or_empty = _looks_currency_or_empty(L) or L_strip in ("(", "(  ")
-        right_has_data = bool(R_strip) and not _looks_currency_or_empty(R)
-        right_currency_or_empty = _looks_currency_or_empty(R) or R_strip in (")", "  )")
-        left_has_data = bool(L_strip) and not _looks_currency_or_empty(L)
+    if n_data_rows < 2 or n_same < 2:
+        return None
 
-        if (
-            same_after_strip
-            or (left_currency_or_empty and right_has_data)
-            or (left_has_data and right_currency_or_empty)
-        ):
-            n_dup_pattern += 1
+    if n_same >= max(2, int(0.8 * n_data_rows)):
+        # Keep whichever column has more populated cells (tie-break: keep right)
+        return "right" if left_nonempty > right_nonempty else "left"
 
-    # Need at least some data rows and values to make a判断
-    if n_data_rows == 0 or n_value_rows < 2:
-        return False
-    
-    # Columns are duplicates if >= 80% of rows match the pattern
-    return n_dup_pattern >= max(2, int(0.8 * n_data_rows))
+    return None
 
 
 def _dedupe_table_columns(rows: List[List[str]]) -> List[List[str]]:
-    """
-    Remove duplicate adjacent columns from a table.
-    
-    Scans left-to-right. If column i and column i+1 are
-    equivalent, column i is removed.
-    
-    Example:
-      | $1,234 | 1,234 | $5,678 |
-      →  | 1,234 | $5,678 |
-    """
+    """Remove duplicate or currency-spacer adjacent columns from a table."""
     if not rows:
         return rows
-    
-    # Pad all rows to the same length (in case of ragged tables)
+
     n_cols = max(len(r) for r in rows)
     padded = [r + [""] * (n_cols - len(r)) for r in rows]
 
-    # Start with all columns visible
+    # Exclude Markdown separator rows (|---|---|) from equivalence checks!
+    data_rows = [r for r in padded if not _is_separator_row(r)]
+    if len(data_rows) < 2:
+        return rows
+
     keep_mask = [True] * n_cols
-    
-    # Scan adjacent column pairs
     i = 0
     while i + 1 < n_cols:
         if not keep_mask[i] or not keep_mask[i + 1]:
             i += 1
             continue
-        left_col = [r[i] for r in padded]
-        right_col = [r[i + 1] for r in padded]
-        if _columns_equivalent(left_col, right_col):
-            keep_mask[i] = False  # remove the left duplicate
-            i += 2                # skip the pair
+        left_col = [r[i] for r in data_rows]
+        right_col = [r[i + 1] for r in data_rows]
+        drop = _choose_column_to_drop(left_col, right_col)
+        if drop == "left":
+            keep_mask[i] = False
+            i += 2
+        elif drop == "right":
+            keep_mask[i + 1] = False
+            i += 2
         else:
             i += 1
 
-    # If nothing to remove, return original rows unchanged
     if all(keep_mask):
         return rows
-    
-    # Apply the mask — keep only non-duplicate columns
-    out: List[List[str]] = []
-    for r in padded:
-        out.append([r[j] for j in range(n_cols) if keep_mask[j]])
-    return out
 
+    return [[r[j] for j in range(n_cols) if keep_mask[j]] for r in padded]
 
-# ============================================================
-# MAIN FUNCTION
-# ============================================================
 
 def cleanup_markdown_tables(markdown: str) -> str:
-    """
-    Clean up Markdown tables by removing duplicate columns.
-    
-    This is the main function called by download_data.py and app.py.
-    
-    Args:
-        markdown: Raw Markdown text (possibly with messy tables)
-    
-    Returns:
-        Cleaned Markdown text with duplicate table columns removed
-    
-    How it works:
-        1. Split the text into lines
-        2. Group consecutive table rows together
-        3. For each table group, detect and remove duplicate columns
-        4. Reassemble the text
-    """
-    if "|" not in markdown:
-        # No tables at all — return as-is
+    """Clean up Markdown tables by removing duplicate and currency-spacer columns."""
+    if not markdown or "|" not in markdown:
         return markdown
 
     out_lines: List[str] = []
-    buf: List[str] = []  # buffer for current table rows
+    buf: List[str] = []
 
-    def flush_table():
-        """
-        Process the buffered table rows and append cleaned version to output.
-        """
+    def flush_table() -> None:
         nonlocal buf
         if not buf:
             return
-        rows = [_split_row(l) for l in buf]
+        rows = [_split_row(line) for line in buf]
         new_rows = _dedupe_table_columns(rows)
         if new_rows is rows or new_rows == rows:
-            # No changes — output original rows
             out_lines.extend(buf)
         else:
-            # Changes made — output cleaned rows
             for r in new_rows:
                 out_lines.append(_join_row(r))
         buf = []
 
-    # Process each line
     for line in markdown.split("\n"):
         if _TABLE_LINE_RE.match(line):
-            # This is a table row — add to buffer
             buf.append(line)
         else:
-            # Not a table row — flush any buffered table, then output the line
             flush_table()
             out_lines.append(line)
-    
-    # Flush any remaining table at the end
-    flush_table()
 
+    flush_table()
     return "\n".join(out_lines)

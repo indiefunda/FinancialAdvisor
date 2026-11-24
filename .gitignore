@@ -1,17 +1,23 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.egg-info/
 dist/
 *.egg
+.pytest_cache/
 
-# Environment
+# Virtual environments
 .env
+.env.*
 .venv/
 venv/
 
-# Transcript cookies (auto-generated, contains session data)
+# Local secrets, API keys & runtime state (NEVER commit!)
+Secrets.txt
+secrets.txt
+secrets.json
+.secrets.json
+.quota_state.json
 .cookies.json
 
 # OS
@@ -22,7 +28,8 @@ Thumbs.db
 build/
 *.spec
 
-# Downloaded SEC data (regenerable, large)
+# Downloaded SEC filings & transcripts (regenerable, large)
+data/
 HUIZ/
 JFIN/
 LU/
