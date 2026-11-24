@@ -11,7 +11,7 @@ from ai_analyst import (
     ANALYSIS_WORKFLOWS,
     DEEPSEEK_MODELS,
     SYSTEM_PROMPT_BASE,
-    SYSTEM_PROMPT_VALUATION,
+    SYSTEM_PROMPT_VALUATION_CHAT,
     VALUATION_PROTOCOL_PATH,
     ValuationParameters,
     build_dossier_context,
@@ -923,7 +923,7 @@ with tab_ai:
 
                     dossier_text, _ = build_dossier_context(chosen_files)
                     chat_mode = st.session_state.get(f"deepseek_chat_mode_{ai_ticker}")
-                    chat_sys = SYSTEM_PROMPT_VALUATION if chat_mode == "scientific_valuation" else SYSTEM_PROMPT_BASE
+                    chat_sys = SYSTEM_PROMPT_VALUATION_CHAT if chat_mode == "scientific_valuation" else SYSTEM_PROMPT_BASE
                     candidate_history = st.session_state[chat_key] + [{"role": "user", "content": user_q}]
                     messages = [
                         {
@@ -946,6 +946,7 @@ with tab_ai:
                                 api_key=deepseek_key,
                                 messages=messages,
                                 model=ai_model,
+                                temperature=0.0 if chat_mode == "scientific_valuation" else 0.2,
                                 max_tokens=65536 if chat_mode == "scientific_valuation" else 16384,
                                 stream=True,
                                 on_progress=_on_chat_progress,

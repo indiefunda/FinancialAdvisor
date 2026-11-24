@@ -77,14 +77,34 @@ SYSTEM_PROMPT_VALUATION = (
     "and do NOT hedge with generic financial disclaimers."
 )
 
+SYSTEM_PROMPT_VALUATION_CHAT = (
+    "You are an institutional, fundamental long-term equity analyst in the tradition of "
+    "Warren Buffett, Bruce Greenwald, and Michael Mauboussin. "
+    "Continue discussing and refining the company's CAPM/WACC-free 5-year hurdle-rate valuation "
+    "grounded strictly in the attached dossier. "
+    "NEVER use CAPM, Beta, or WACC. Tag every numerical input (`[Filing: ...]`, `[Market Data: ...]`, "
+    "`[Assumption]`), show math transparently, and respond directly to the user's question without "
+    "repeating the full 6-phase report or emitting a JSON summary tag unless explicitly requested."
+)
+
 _VALUATION_SUMMARY_RE = re.compile(
-    r"<!--\s*valuation-summary-json\s*(\{.*?\})\s*-->",
+    r"<!--\s*valuation-summary-json\s*(\{.*?\})\s*-->[ \t]*\r?\n*",
     re.DOTALL,
+)
+_REQUIRED_SUMMARY_NUMERIC_KEYS = (
+    "current_price",
+    "expected_total_return_pct",
+    "expected_irr_pct",
+    "max_weight_pct",
 )
 
 
 def extract_valuation_summary(markdown_text: str) -> Optional[Dict[str, Any]]:
-    """Parse the machine-readable `valuation-summary-json` comment emitted at the top of a valuation memo."""
+    """Parse and validate the machine-readable `valuation-summary-json` comment from a valuation memo.
+
+    Returns `None` if the tag is missing or lacks any required core metric so partial JSON
+    never renders misleading zeroed KPI cards.
+    """
     if not markdown_text:
         return None
     m = _VALUATION_SUMMARY_RE.search(markdown_text)
@@ -92,16 +112,31 @@ def extract_valuation_summary(markdown_text: str) -> Optional[Dict[str, Any]]:
         return None
     try:
         data = json.loads(m.group(1))
-        return data if isinstance(data, dict) else None
     except (ValueError, TypeError):
         return None
+    if not isinstance(data, dict):
+        return None
+
+    verdict = data.get("verdict")
+    if not isinstance(verdict, str) or not verdict.strip():
+        return None
+    for k in _REQUIRED_SUMMARY_NUMERIC_KEYS:
+        if k not in data or data[k] is None or isinstance(data[k], bool):
+            return None
+        try:
+            val = float(data[k])
+        except (TypeError, ValueError):
+            return None
+        if k == "current_price" and val <= 0:
+            return None
+    return data
 
 
 def strip_valuation_summary_tag(markdown_text: str) -> str:
-    """Remove the hidden `valuation-summary-json` comment before rendering Markdown in Streamlit."""
+    """Remove the hidden `valuation-summary-json` comment and any trailing blank lines."""
     if not markdown_text:
         return markdown_text
-    return _VALUATION_SUMMARY_RE.sub("", markdown_text, count=1).lstrip()
+    return _VALUATION_SUMMARY_RE.sub("", markdown_text, count=1).lstrip("\r\n")
 
 
 @dataclass
@@ -195,6 +230,7 @@ ANALYSIS_WORKFLOWS: Dict[str, Dict[str, Any]] = {
         "label": "🧮 5-Year Hurdle-Rate Valuation (Custom Protocol)",
         "short_desc": "Run your editable CAPM/WACC-free 6-phase IRR & Quarter-Kelly protocol over SEC filings & transcripts.",
         "max_tokens": 65536,
+        "temperature": 0.0,
         "system_prompt": SYSTEM_PROMPT_VALUATION,
         "prompt": "",  # Built dynamically from valuation_protocol.md + ValuationParameters
     },
@@ -627,6 +663,7 @@ def run_workflow_analysis(
 
     sys_prompt = str(wf.get("system_prompt") or SYSTEM_PROMPT_BASE) if wf else SYSTEM_PROMPT_BASE
     effective_max_tokens = int(max_tokens or (wf.get("max_tokens", 4096) if wf else 4096))
+    effective_temp = float(wf["temperature"]) if (wf and "temperature" in wf) else 0.2
 
     # Place dossier in system message so follow-up turns hit DeepSeek's prompt cache!
     messages = [
@@ -638,6 +675,7 @@ def run_workflow_analysis(
         api_key=api_key,
         messages=messages,
         model=model,
+        temperature=effective_temp,
         max_tokens=effective_max_tokens,
         stream=stream,
         on_progress=on_progress,

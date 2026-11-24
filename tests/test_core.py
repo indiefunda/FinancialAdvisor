@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ai_analyst import (
+    SYSTEM_PROMPT_VALUATION_CHAT,
     ValuationParameters,
     build_dossier_context,
     call_deepseek,
@@ -655,18 +656,25 @@ def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
     proto = load_valuation_protocol()
     assert "Executive Return Summary" in proto
     assert "Total % Return" in proto
+    assert "Anchor Precedence Rule" in proto
+    assert ">20% Deviation Rule" in proto
+    assert "Diluted Share Base Rule" in proto
+    assert "All 9 cells" in proto
     assert "NO CAPM, NO BETA, NO WACC" in proto
     assert "Share-Class & ADS Ratio Normalization" in proto
     assert "RONIC" in proto
     assert "Phase 6: Mandatory Self-Audit" in proto
     assert "Quarter-Kelly" in proto
 
+    assert "NEVER use CAPM, Beta, or WACC" in SYSTEM_PROMPT_VALUATION_CHAT
+    assert "valuation-summary-json" not in SYSTEM_PROMPT_VALUATION_CHAT
+
     sample_md = (
         '<!-- valuation-summary-json {"currency":"USD","current_price":3.67,"target_year":2031,'
         '"expected_price":9.41,"expected_total_return_pct":156.4,"expected_irr_pct":20.9,'
         '"base_price":9.22,"base_total_return_pct":151.2,"bear_total_return_pct":8.3,'
         '"bull_total_return_pct":399.1,"catastrophe_total_return_pct":-29.0,'
-        '"max_weight_pct":8.6,"verdict":"CLEARS"} -->\n# Executive Return Summary\nBody'
+        '"max_weight_pct":8.6,"verdict":"CLEARS"} -->\n\n# Executive Return Summary\nBody'
     )
     parsed = extract_valuation_summary(sample_md)
     assert parsed is not None
@@ -676,6 +684,10 @@ def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
     assert stripped.startswith("# Executive Return Summary")
     assert "valuation-summary-json" not in stripped
 
+    # Partial JSON must be rejected so UI never renders bogus +0.0% / $10,000 KPI cards!
+    assert extract_valuation_summary('<!-- valuation-summary-json {"currency":"USD"} -->') is None
+    assert extract_valuation_summary('<!-- valuation-summary-json {"current_price":0,"expected_total_return_pct":10,"expected_irr_pct":5,"max_weight_pct":5,"verdict":"CLEARS"} -->') is None
+
     # 2. User can save edits to a custom protocol file (and empty text is rejected)
     custom_path = tmp_path / "valuation_protocol.md"
     save_valuation_protocol("# My Updated Protocol\nHurdle: 18%\n", path=custom_path)
@@ -683,7 +695,7 @@ def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
     with pytest.raises(ValueError, match="empty"):
         save_valuation_protocol("   ", path=custom_path)
 
-    # 3. ValuationParameters + scientific_valuation workflow passes CAPM-free system prompt & max_tokens=65536
+    # 3. ValuationParameters + scientific_valuation workflow passes CAPM-free system prompt, max_tokens=65536, temp=0.0
     t_dir = tmp_path / "HUIZ"
     t_dir.mkdir(parents=True)
     (t_dir / "CompanyBrief.md").write_text("# HUIZ Brief\nTTM Revenue (CNY): CNY 1.34B\n", encoding="utf-8")
@@ -729,6 +741,7 @@ def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
     assert res.finish_reason == "stop"
     sent_payload = mock_session.post.call_args.kwargs["json"]
     assert sent_payload["max_tokens"] == 65536
+    assert sent_payload["temperature"] == 0.0
     assert "NEVER use CAPM, Beta, or WACC" in sent_payload["messages"][0]["content"]
     user_msg = sent_payload["messages"][1]["content"]
     assert "18.00% nominal annual IRR" in user_msg

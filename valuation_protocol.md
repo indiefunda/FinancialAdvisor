@@ -223,7 +223,9 @@ For each scenario, justify:
 
 2. **Greenwald Moat & Margin Durability Test:** Briefly assess barriers to entry (customer captivity, scale economies, switching costs, regulatory licenses) to verify whether projected Base Case margins can persist without competitive erosion.
 
-3. **Share Count Dynamics (Consistent SBC, Historical Buyback Cap & 1-Pass Pricing):**
+3. **Share Count Dynamics (Diluted Base, Consistent SBC, Historical Buyback Cap & 1-Pass Pricing):**
+
+   * *Diluted Share Base Rule:* Start Year 0 share count from the latest filing's **Diluted Share/ADS Count** (never a lower basic or market-implied basic count, unless basic-only is explicitly justified when no dilutive instruments exist).
 
    * *SBC Convention (Pick One & Match Peers/Phase 1):*
 
@@ -236,6 +238,9 @@ For each scenario, justify:
    * *1-Pass Non-Circular Buyback Price Rule:* (1) Compute an initial Year 5 Terminal Value per Share assuming **zero buybacks**, (2) set each scenario's average repurchase price as the midpoint between today's price and that unadjusted Year 5 Value, and (3) compute retired shares and final Year 5 Terminal Value per Share in **one pass**.
 
 4. **Exit Multiple Benchmarking & Trailing Theoretical Cross-Check (Conditional on Survival):**
+
+   * **Anchor Precedence Rule (Deterministic Order):** Anchor the Base exit multiple in strict priority order: **(1) Anchor 1 (Named Global Peers)** when available → **(2) Anchor 2 (Company's Own 5–10Y Historical Band)** when Anchor 1 is offline → **(3) Trailing Formula Cross-Check** strictly as an economic sanity bound.
+   * **>20% Deviation Rule:** If the chosen Base exit multiple deviates by more than **20%** from the Trailing Formula Cross-Check (justified EV/NOPAT or justified P/B), explicitly justify the gap (e.g., cyclical trough/peak, temporary ROE overhang, or structural discount).
 
    * **Anchor 1 — Named Global Peer Group:** List specific peers, exact date (`[Market Data: Source, Date]`), GAAP vs. Non-GAAP basis, and **through-cycle median** EV/NOPAT multiples. Flag if peers sit at a cyclical peak or trough. *(If offline with no peer data provided, invoke Rule 7's Offline Fallback explicitly.)*
 
@@ -253,7 +258,7 @@ $$
 
    * *Correlation Check:* Confirm that the Bear Case multiple prices **operating stagnation**, NOT the existential tail risk modeled in Phase 4.
 
-5. **Physics vs. Sentiment $3 \times 3$ Scenario Cross-Grid:** Present a $3 \times 3$ table mapping **Year 5 NOPAT** (Bear, Base, Bull as rows) against **Year 5 Exit EV/NOPAT Multiple** (Bear, Base, Bull as columns), displaying the home-currency 5-year IRR in every cell. The center cell `(Base NOPAT, Base Multiple)` must match the Phase 3 Base Case IRR exactly.
+5. **Physics vs. Sentiment $3 \times 3$ Scenario Cross-Grid:** Present a $3 \times 3$ table mapping **Year 5 NOPAT** (Bear, Base, Bull as rows) against **Year 5 Exit EV/NOPAT Multiple** (Bear, Base, Bull as columns), displaying the home-currency 5-year IRR in every cell. Recompute and verify **all 9 cells** from the stated row earnings/book, diluted share count, and column exit multiple; the center cell `(Base, Base)` must match the Phase 3 Base Case IRR exactly, and any quoted Base Case range must reconcile directly with the grid cells.
 
 6. **Home-Currency FX Sensitivity Strip:** Directly beneath the $3 \times 3$ grid, report both the **Base Case IRR** and **Expected IRR** across three 5-year reporting-currency-vs.-home-currency FX paths: **$-20\%$ (reporting currency depreciation)**, **Base FX**, and **$+20\%$ (reporting currency appreciation)**.
 
@@ -279,13 +284,13 @@ $$
 
   * Include any net dividends actually collected *prior* to $t_{\text{cat}}$ at their exact dates in the home-currency cash-flow vector, with terminal recovery at $t_{\text{cat}}$ and zero cash flows thereafter. Explicitly distinguish partial impairment from total ($-100\%$) loss.
 
-| Scenario | Probability (%) | Year 5 NOPAT | Exit Multiple | Terminal Value/Share (Home CCY) | Total Return (%) | Total Multiple (MOIC) | 5-Year IRR (Home CCY) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Catastrophe (at $t_{\text{cat}}$)** | [Evidence-based] | — | — | [Explicit recovery build] | | | |
-| **Bear (Stagnation)** | [Evidence-based] | | | | | | |
-| **Base (Normalized)** | [Evidence-based] | | | | | | |
-| **Bull (Re-Rating)** | [Evidence-based] | | | | | | |
-| **Expected Value (Weighted)** | **100%** | — | — | **Weighted Price** | **Weighted %** | **Weighted MOIC** | **Expected IRR** |
+| Scenario | Probability (%) | Year 5 NOPAT | Exit Multiple | Terminal Value/Share (Home CCY) | Total Return (%) | 5-Year IRR (Home CCY) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Catastrophe (at $t_{\text{cat}}$)** | [Evidence-based] | — | — | [Explicit recovery build] | | |
+| **Bear (Stagnation)** | [Evidence-based] | | | | | |
+| **Base (Normalized)** | [Evidence-based] | | | | | |
+| **Bull (Re-Rating)** | [Evidence-based] | | | | | |
+| **Expected Value (Weighted)** | **100%** | — | — | **Weighted Price** | **Weighted %** | **Expected IRR** |
 
 * **Unified Expected IRR Rule (Probability-Weighted Annual Cash-Flow Vector):**
 
@@ -358,17 +363,18 @@ Before finalizing, output a brief **Pass / Fail** verification table confirming 
 | Audit Check | Status (`PASS` / `FAIL`) | Evidence / Line Check |
 | :--- | :---: | :--- |
 | 1. No CAPM, Beta, or WACC used anywhere; trailing cross-check uses $r \neq H$ and shows $r \pm 200\text{ bps}$ | | |
-| 2. ADS / share-class ratio stated and all per-share/share-count figures normalized to one tradable unit | | |
+| 2. ADS / share-class ratio stated; Year 5 share count is **Diluted** (or basic explicitly justified) on one tradable unit | | |
 | 3. Invested Capital uses Parent Stockholders' Equity (no double-count of consolidated NCI) | | |
 | 4. Cash haircut applied only to positive cash; shortfall, debt, NCI & preferred at 100% | | |
 | 5. Leases treated symmetrically across EBIT, Invested Capital, and Debt | | |
 | 6. SBC convention matches Phase 1 Owner Earnings, Phase 3 shares & peers; Phase 2 yield labeled diagnostic | | |
 | 7. Sales-to-Capital ratio anchored to Phase 1 `[Filing]` data; reinvestment $\ge 0$ | | |
 | 8. Buyback pace capped at Phase 2 executed history (or catalyst justified); 1-pass price used | | |
-| 9. Exit multiple cross-check uses $\text{RONIC}$ and trailing $(1+g)$ factor; Bear excludes tail risk | | |
-| 10. Phase 3 Base Case IRR matches center cell `(Base NOPAT, Base Multiple)` of $3 \times 3$ cross-grid | | |
+| 9. Exit multiple follows Anchor 1 → Anchor 2 → Formula precedence; >20% deviation from formula explicitly justified; Bear excludes tail risk | | |
+| 10. **All 9 cells** of $3 \times 3$ cross-grid reconcile arithmetically; center cell matches Base Case IRR and quoted Base range matches grid | | |
 | 11. Catastrophe uses gross offshore cash at explicit $t_{\text{cat}}$; probability bounds & $\pm 10\text{ pp}$ test shown | | |
 | 12. Probabilities sum to 100%; Expected IRR uses annual home-CCY cash-flow vector; FX strip & input tags complete | | |
+| 13. Executive Return Summary table & `valuation-summary-json` tag reconcile **exactly** with Phase 4/5 outputs | | |
 
 ## Optional Module: Cross-Border / Emerging Market / VIE Risk
 
