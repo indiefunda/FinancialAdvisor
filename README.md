@@ -36,8 +36,10 @@ Uses a **5-stage quota-preserving waterfall** built for free personal keys:
   3. **🕵️ Management Credibility & Promise Tracker** — diffs consecutive quarters to spot delivered promises vs. disappearing KPIs & dodged Q&A.
   4. **🚩 Red-Flag & Accounting Risk Scanner** — checks GAAP/Non-GAAP gaps, dilution, VIE/governance risks, and peer anomalies.
   5. **📑 Full Investment Thesis Memo** — synthesizes the entire dossier into a Bull/Base/Bear IC memo.
-- **💬 Prompt-Cached Dossier Chat** — ask follow-up questions grounded in attached files with live token & USD cost estimates.
-- **📊 Native KPI cards** — the memo's trailing `valuation-summary-json` block is machine-parsed into four Streamlit metric cards (expected return, `$10,000` proceeds, base target, downside/asymmetry).
+- **🧮 Deterministic Python Math Engine (`valuation_math.py`)** — exposed via OpenAI-compatible function calling so DeepSeek offloads every dated-cash-flow IRR solve, 1-pass non-circular buyback calculation, 9-cell `3×3` cross-grid (both EV/NOPAT and financial P/B × ROE), break-even 0% IRR CAGR solve, `±10 pp` probability sensitivity, and asymmetry ratio to exact Python math (with unit/scale sanity validation and a `🧮 Python math verified` completion badge).
+- **🔄 Seamless Auto-Continuation** — if a long report hits `finish_reason == "length"`, the client automatically continues via prompt cache (up to 2 rounds) so memos complete all 6 phases cleanly.
+- **💬 Prompt-Cached Dossier Chat** — ask follow-up questions grounded in attached files (with the same Python math tools active in valuation mode) and live token & USD cost estimates.
+- **📊 Executive Return Dashboard** — the memo's trailing `valuation-summary-json` block renders into a bordered top dashboard with 4 KPI metric cards (expected return, `$10,000` proceeds, base target, downside/asymmetry), a **Scenario Return Breakdown** table (`Catastrophe` / `Bear` / `Base` / `Bull` / `Weighted Expected`), and a **Median + Base ±10 pp Sensitivity** strip.
 
 ### 📐 Protocol V6 — USD Intrinsic Valuation (CAPM/WACC-Free)
 `valuation_protocol.md` is versioned and editable from the UI. Its governing rules:

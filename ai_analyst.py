@@ -583,7 +583,11 @@ def _single_deepseek_round(
                             fn = tc.get("function")
                             if isinstance(fn, dict):
                                 if fn.get("name"):
-                                    entry["function"]["name"] += str(fn["name"])
+                                    name_chunk = str(fn["name"])
+                                    if not entry["function"]["name"]:
+                                        entry["function"]["name"] = name_chunk
+                                    elif name_chunk != entry["function"]["name"]:
+                                        entry["function"]["name"] += name_chunk
                                 if fn.get("arguments"):
                                     entry["function"]["arguments"] += str(fn["arguments"])
                     if on_progress and (r_chars + c_chars - last_report) >= 250:
@@ -643,6 +647,7 @@ def call_deepseek_full(
     tool_executor: Optional[Callable[[str, str], str]] = None,
     max_tool_rounds: int = 6,
     auto_continue: bool = False,
+    max_continuations: int = 2,
     stats_out: Optional[Dict[str, int]] = None,
     session: Optional[requests.Session] = None,
 ) -> Tuple[str, str, str, Dict[str, int]]:
@@ -702,8 +707,22 @@ def call_deepseek_full(
                 on_progress=on_progress,
             )
         except RuntimeError as exc:
-            # Graceful fallback if a DeepSeek endpoint rejects tools parameter
-            if allow_tools and "HTTP 400" in str(exc) and "tool" in str(exc).lower():
+            err_low = str(exc).lower()
+            has_rc_field = any("reasoning_content" in m for m in working_msgs)
+            # Graceful fallback if endpoint rejects `reasoning_content` on a tool-call round
+            if "http 400" in err_low and has_rc_field and "reasoning_content" in err_low:
+                working_msgs = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in working_msgs]
+                payload = _build_payload(working_msgs, include_tools=allow_tools)
+                r_content, r_reasoning, r_finish, r_tcs, r_usage = _single_deepseek_round(
+                    http=http,
+                    headers=headers,
+                    payload=payload,
+                    timeout=timeout,
+                    stream=stream,
+                    on_progress=on_progress,
+                )
+            # Graceful fallback if a DeepSeek endpoint rejects the `tools` parameter
+            elif allow_tools and "http 400" in err_low and "tool" in err_low:
                 active_tools = None
                 payload = _build_payload(working_msgs, include_tools=False)
                 r_content, r_reasoning, r_finish, r_tcs, r_usage = _single_deepseek_round(
@@ -753,8 +772,8 @@ def call_deepseek_full(
         finish_reason = r_finish
         break
 
-    # Seamless auto-continuation when content was truncated mid-report (`finish_reason == "length"`)
-    if auto_continue and finish_reason == "length" and content:
+    # Seamless auto-continuation when content is truncated mid-report (`finish_reason == "length"`)
+    while auto_continue and finish_reason == "length" and content and continuations_used < max(1, max_continuations):
         continuations_used += 1
         if on_progress:
             on_progress("continuing", sum(len(x) for x in all_reasoning), len(content))
@@ -790,6 +809,8 @@ def call_deepseek_full(
         if c_content:
             content = (content.rstrip() + "\n" + c_content.lstrip()).strip()
         finish_reason = c_finish
+        if not c_content:
+            break
 
     reasoning = "\n\n---\n\n".join(all_reasoning).strip()
 

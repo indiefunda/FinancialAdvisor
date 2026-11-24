@@ -20,6 +20,8 @@ Use rigorous financial analysis, explicit assumptions and evidence-based probabi
 
 Do not introduce personal investment objectives, portfolio constraints, position sizing or investor-specific return targets.
 
+**Computational execution rule:** When Python valuation calculator functions are provided in the runtime (`compute_operating_valuation_model`, `compute_pb_grid`, `compute_four_state_summary`, `compute_irr_and_returns`), execute all dated-cash-flow IRR solves, one-pass buyback calculations, 9-cell $3 \times 3$ cross-grids, break-even growth solves, $\pm 10$ pp probability sensitivities and asymmetry ratios through those functions rather than hand-iterating.
+
 ## 1.1 Universal USD currency policy
 
 **USD is the exclusive currency for all financial comparisons, valuation calculations, projected cash flows and investment returns.**

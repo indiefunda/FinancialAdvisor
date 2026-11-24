@@ -724,10 +724,16 @@ with tab_ai:
             total_bytes = sum(f.size_bytes for f in chosen_files)
             est_in_tokens = max(1, total_bytes // 4) if chosen_files else 0
             est_cost_miss = estimate_cost_usd(ai_model, est_in_tokens, 6000, cache_hit_tokens=0)
-            est_cost_hit = estimate_cost_usd(ai_model, est_in_tokens, 6000, cache_hit_tokens=est_in_tokens)
+            # 5Y Valuation typically uses 1 initial miss + ~2 cached Python-math tool rounds + ~14k output tokens
+            est_cost_val = (
+                estimate_cost_usd(ai_model, est_in_tokens, 14000, cache_hit_tokens=0)
+                + 2 * estimate_cost_usd(ai_model, est_in_tokens, 600, cache_hit_tokens=est_in_tokens)
+            )
+            est_cost_hit = estimate_cost_usd(ai_model, est_in_tokens, 4000, cache_hit_tokens=est_in_tokens)
             st.caption(
                 f"Attached: **{len(chosen_files)} file(s)** (~{est_in_tokens:,} input tokens) | "
-                f"Est. off-peak cost: **${est_cost_miss:.4f}** (1st run) / **${est_cost_hit:.4f}** (cached follow-up)"
+                f"Est. off-peak cost: **~${est_cost_val:.4f}** (5Y Valuation w/ ~3 cached math rounds) · "
+                f"**~${est_cost_miss:.4f}** (standard workflow) · **~${est_cost_hit:.4f}** (cached chat)"
             )
 
             # ── Security-Level Valuation Settings & Editable Protocol (USD-Only) ──
@@ -1022,7 +1028,10 @@ with tab_ai:
                                 "Annualized IRR": f"{exp_irr:+.1f}%",
                                 "$10,000 Becomes": f"${ten_k_exp:,.0f}",
                             })
-                            st.dataframe(scen_rows, hide_index=True, use_container_width=True)
+                            try:
+                                st.dataframe(scen_rows, hide_index=True, width="stretch")
+                            except TypeError:
+                                st.dataframe(scen_rows, hide_index=True)
 
                         # Compact sensitivity & distribution footer strip
                         foot_bits: List[str] = []

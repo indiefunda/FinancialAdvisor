@@ -1250,5 +1250,211 @@ def test_deepseek_sse_tool_calling_and_seamless_auto_continuation():
     assert "tools" not in fb_session.post.call_args_list[1].kwargs["json"]
 
 
+def test_valuation_math_unit_guards_strict_scenarios_pb_zero_buyback_and_edge_cases():
+    base_scens = {
+        "bear": {"revenue_growth_y1_to_y5": [0.02] * 5, "ebit_margins_y1_to_y5": [0.14] * 5, "terminal_g": 0.02, "exit_multiple": 7.0},
+        "base": {"revenue_growth_y1_to_y5": [0.08] * 5, "ebit_margins_y1_to_y5": [0.18] * 5, "terminal_g": 0.03, "exit_multiple": 10.0},
+        "bull": {"revenue_growth_y1_to_y5": [0.14] * 5, "ebit_margins_y1_to_y5": [0.22] * 5, "terminal_g": 0.035, "exit_multiple": 13.0},
+    }
+
+    # 1. Raw share count (173,340,000 instead of 173.34) MUST be rejected, never silently scaled by 1e6!
+    err_shares = json.loads(execute_valuation_tool("compute_operating_valuation_model", json.dumps({
+        "entry_price_usd": 3.67,
+        "starting_diluted_shares_m": 173_340_000,
+        "starting_excess_cash_m": 100.0,
+        "year0_revenue_m": 400.0,
+        "tax_rate": 0.15,
+        "sales_to_capital": 5.0,
+        "cash_haircut": 0.5,
+        "scenarios": base_scens,
+    })))
+    assert "error" in err_shares and "MILLIONS" in err_shares["error"]
+
+    # Raw dollar revenue ($400,000,000,000 > $10T in millions) and percent-vs-decimal tax_rate=15 MUST be rejected
+    err_rev = json.loads(execute_valuation_tool("compute_operating_valuation_model", json.dumps({
+        "entry_price_usd": 10.0,
+        "starting_diluted_shares_m": 50.0,
+        "starting_excess_cash_m": 100.0,
+        "year0_revenue_m": 40_000_000.0,
+        "tax_rate": 0.15,
+        "sales_to_capital": 5.0,
+        "cash_haircut": 0.5,
+        "scenarios": base_scens,
+    })))
+    assert "error" in err_rev and "MILLIONS" in err_rev["error"]
+
+    with pytest.raises(ValueError, match="decimal"):
+        compute_operating_valuation_model(
+            entry_price_usd=10.0,
+            starting_diluted_shares_m=50.0,
+            starting_excess_cash_m=100.0,
+            year0_revenue_m=400.0,
+            tax_rate=15.0,
+            sales_to_capital=5.0,
+            cash_haircut=0.5,
+            scenarios=base_scens,
+        )
+
+    # 2. Missing scenario or missing required keys MUST raise (never invent silent defaults)
+    with pytest.raises(ValueError, match="missing required key"):
+        compute_operating_valuation_model(
+            entry_price_usd=10.0,
+            starting_diluted_shares_m=50.0,
+            starting_excess_cash_m=100.0,
+            year0_revenue_m=400.0,
+            tax_rate=0.15,
+            sales_to_capital=5.0,
+            cash_haircut=0.5,
+            scenarios={**base_scens, "bear": {"revenue_growth_y1_to_y5": [0.02] * 5}},
+        )
+    with pytest.raises(ValueError, match="missing required key"):
+        compute_pb_grid(
+            entry_price_usd=3.67,
+            starting_book_equity_m=700.0,
+            diluted_shares_m=183.06,
+            scenarios={
+                "bear": {"roe": 0.09, "payout_ratio": 0.0, "terminal_g": 0.02, "exit_pb": 0.60},
+                "base": {"roe": 0.125, "terminal_g": 0.03, "exit_pb": 1.10},  # missing payout_ratio
+                "bull": {"roe": 0.16, "payout_ratio": 0.0, "terminal_g": 0.035, "exit_pb": 1.35},
+            },
+        )
+
+    # 3. P/B true zero-buyback Pass 1: zero_buyback_tv_usd MUST equal the exact 0-buyback TV!
+    pb_no_bb = compute_pb_grid(
+        entry_price_usd=3.67,
+        starting_book_equity_m=700.0,
+        diluted_shares_m=183.06,
+        scenarios={
+            "bear": {"roe": 0.09, "payout_ratio": 0.10, "terminal_g": 0.02, "exit_pb": 0.60, "annual_buyback_usd_m": 0.0},
+            "base": {"roe": 0.125, "payout_ratio": 0.10, "terminal_g": 0.03, "exit_pb": 1.10, "annual_buyback_usd_m": 0.0},
+            "bull": {"roe": 0.16, "payout_ratio": 0.10, "terminal_g": 0.035, "exit_pb": 1.35, "annual_buyback_usd_m": 0.0},
+        },
+    )
+    pb_with_bb = compute_pb_grid(
+        entry_price_usd=3.67,
+        starting_book_equity_m=700.0,
+        diluted_shares_m=183.06,
+        scenarios={
+            "bear": {"roe": 0.09, "payout_ratio": 0.10, "terminal_g": 0.02, "exit_pb": 0.60, "annual_buyback_usd_m": 15.0},
+            "base": {"roe": 0.125, "payout_ratio": 0.10, "terminal_g": 0.03, "exit_pb": 1.10, "annual_buyback_usd_m": 30.0},
+            "bull": {"roe": 0.16, "payout_ratio": 0.10, "terminal_g": 0.035, "exit_pb": 1.35, "annual_buyback_usd_m": 250.0},
+        },
+    )
+    assert pb_with_bb["scenarios"]["base"]["zero_buyback_tv_usd"] == pb_no_bb["scenarios"]["base"]["terminal_price_usd"]
+    assert pb_with_bb["scenarios"]["base"]["buyback_cap_binding"] is False
+    assert pb_with_bb["scenarios"]["bull"]["buyback_cap_binding"] is True
+    assert pb_with_bb["units_sanity"]["implied_market_cap_usd_m"] == round(3.67 * 183.06, 2)
+    # Center cell still matches Base exactly when buybacks are active
+    assert pb_with_bb["grid_3x3_irr_pct"]["base"]["base_pb_1.100x"] == pb_with_bb["scenarios"]["base"]["irr_pct"]
+
+    # 4. Non-op investment compounding & shrinking-share dividends & units_sanity in operating router
+    op_comp = compute_operating_valuation_model(
+        entry_price_usd=10.0,
+        starting_diluted_shares_m=50.0,
+        starting_excess_cash_m=100.0,
+        starting_non_op_investments_m=100.0,
+        after_tax_investment_yield=0.05,
+        year0_revenue_m=400.0,
+        tax_rate=0.20,
+        sales_to_capital=5.0,
+        cash_haircut=0.50,
+        scenarios={
+            "bear": {**base_scens["bear"], "dividend_payout_pct_of_nopat": 0.20, "annual_buyback_usd_m": 0.0},
+            "base": {**base_scens["base"], "dividend_payout_pct_of_nopat": 0.20, "annual_buyback_usd_m": 30.0},
+            "bull": {**base_scens["bull"], "dividend_payout_pct_of_nopat": 0.20, "annual_buyback_usd_m": 40.0},
+        },
+    )
+    assert abs(op_comp["scenarios"]["base"]["year5_non_op_investments_m"] - 100.0 * (1.05 ** 5)) < 0.05
+    assert op_comp["units_sanity"]["implied_market_cap_usd_m"] == 500.0
+    # Per-share dividends grow strictly faster than NOPAT when buybacks shrink the share count
+    divs_base = op_comp["scenarios"]["base"]["net_dividends_y1_to_y5_usd"]
+    assert divs_base[-1] > divs_base[0]
+
+    # 5. Value-destructive growth (low margin + low STC => IRR falls as growth rises): break-even still solves cleanly!
+    op_vdest = compute_operating_valuation_model(
+        entry_price_usd=10.0,
+        starting_diluted_shares_m=50.0,
+        starting_excess_cash_m=450.0,
+        year0_revenue_m=500.0,
+        tax_rate=0.20,
+        sales_to_capital=0.40,
+        cash_haircut=1.0,
+        scenarios={
+            "bear": {"revenue_growth_y1_to_y5": [0.0] * 5, "ebit_margins_y1_to_y5": [0.02] * 5, "terminal_g": 0.0, "exit_multiple": 5.0},
+            "base": {"revenue_growth_y1_to_y5": [0.10] * 5, "ebit_margins_y1_to_y5": [0.02] * 5, "terminal_g": 0.0, "exit_multiple": 5.0},
+            "bull": {"revenue_growth_y1_to_y5": [0.20] * 5, "ebit_margins_y1_to_y5": [0.02] * 5, "terminal_g": 0.0, "exit_multiple": 5.0},
+        },
+    )
+    assert op_vdest["breakeven_0pct_irr_cagr_pct"] is not None
+    assert "value-destructive" in op_vdest["breakeven_note"]
+
+
+def test_deepseek_repeated_sse_tool_name_reasoning_400_and_multi_continuation():
+    # 1. Repeated function.name in later SSE delta MUST NOT double the tool name!
+    sse_r1 = [
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"compute_irr_and_returns","arguments":"{\\"cash_flows\\":"}}]},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"compute_irr_and_returns","arguments":"[-10, 0, 0, 0, 0, 20]}"}}]},"finish_reason":"tool_calls"}]}',
+        "data: [DONE]",
+    ]
+    sse_r2 = [
+        'data: {"choices":[{"delta":{"content":"Done 14.87%."},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    s1, s2 = MagicMock(status_code=200), MagicMock(status_code=200)
+    s1.iter_lines.return_value = iter(sse_r1)
+    s2.iter_lines.return_value = iter(sse_r2)
+    sess = MagicMock()
+    sess.post.side_effect = [s1, s2]
+    txt, _, fin, _ = call_deepseek_full("sk-test", [{"role": "user", "content": "hi"}], stream=True, tools=VALUATION_TOOLS, session=sess)
+    assert txt == "Done 14.87%." and fin == "stop"
+    tool_msg = sess.post.call_args_list[1].kwargs["json"]["messages"][-1]
+    assert json.loads(tool_msg["content"])["irr_pct"] == 14.87
+
+    # 2. HTTP 400 rejecting `reasoning_content` on round 2 strips reasoning_content & retries cleanly
+    a1 = MagicMock(status_code=200)
+    a1.json.return_value = {
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "reasoning_content": "Thinking...",
+                "content": "",
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "compute_irr_and_returns", "arguments": '{"cash_flows": [-10, 20]}'}}],
+            },
+        }],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+    }
+    a2_err = MagicMock(status_code=400)
+    a2_err.json.return_value = {"error": {"message": "Unknown field reasoning_content in message"}}
+    a2_ok = MagicMock(status_code=200)
+    a2_ok.json.return_value = {
+        "choices": [{"finish_reason": "stop", "message": {"content": "Recovered after stripping reasoning_content."}}],
+        "usage": {"prompt_tokens": 120, "completion_tokens": 15},
+    }
+    rc_sess = MagicMock()
+    rc_sess.post.side_effect = [a1, a2_err, a2_ok]
+    rc_txt, _, rc_fin, _ = call_deepseek_full("sk-test", [{"role": "user", "content": "hi"}], tools=VALUATION_TOOLS, session=rc_sess)
+    assert rc_txt == "Recovered after stripping reasoning_content." and rc_fin == "stop"
+    assert all("reasoning_content" not in m for m in rc_sess.post.call_args_list[2].kwargs["json"]["messages"])
+
+    # 3. Multi-shot auto-continuation (2 length caps -> 3rd finishes cleanly)
+    c1 = MagicMock(status_code=200)
+    c1.json.return_value = {"choices": [{"finish_reason": "length", "message": {"content": "Part 1"}}], "usage": {"prompt_tokens": 100, "completion_tokens": 50}}
+    c2 = MagicMock(status_code=200)
+    c2.json.return_value = {"choices": [{"finish_reason": "length", "message": {"content": "Part 2"}}], "usage": {"prompt_tokens": 150, "completion_tokens": 50}}
+    c3 = MagicMock(status_code=200)
+    c3.json.return_value = {"choices": [{"finish_reason": "stop", "message": {"content": "Part 3"}}], "usage": {"prompt_tokens": 200, "completion_tokens": 50}}
+    mc_sess = MagicMock()
+    mc_sess.post.side_effect = [c1, c2, c3]
+    mc_stats = {}
+    mc_txt, _, mc_fin, _ = call_deepseek_full(
+        "sk-test", [{"role": "user", "content": "long report"}],
+        auto_continue=True, max_continuations=2, stats_out=mc_stats, session=mc_sess,
+    )
+    assert mc_txt == "Part 1\nPart 2\nPart 3"
+    assert mc_fin == "stop"
+    assert mc_stats["continuations_used"] == 2
+
+
+
 
 
