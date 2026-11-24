@@ -810,8 +810,12 @@ def test_generate_valuation_pack_and_spot_fx(tmp_path: Path):
     assert "`[Market Data: DefeatBeta, 2026-11-23]`" in vp_text
     assert "`[Market Data: ECB/Frankfurter, 2026-11-23]`" in vp_text
     assert "| Implied Shares Outstanding (Tradable / ADS Basis) | 100.00M |" in vp_text
+    assert "already in USD (home currency) — do NOT convert them." in vp_text
+    assert "`× 0.138500`" in vp_text
     assert "ADS / Share-Class Ratio Alert" in vp_text
-    assert "~100:1" in vp_text
+    assert "100.00x" in vp_text
+    assert "as of `2026-09-30`" in vp_text
+    assert "~100:1" not in vp_text
     # Word-boundary regex regressions ("ratio" in "operations", "share" in "shareholders")
     assert "Net Income Continuous Operations | CNY 35.40M | CNY 31.00M" in vp_text
     assert "Net Income(Attributable to Parent Company Shareholders) | CNY 40.40M | CNY 36.00M" in vp_text
