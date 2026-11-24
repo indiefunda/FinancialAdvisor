@@ -244,6 +244,7 @@ class SecDownloadResult:
     markdown_dir: Path
     forms_requested: int = 0
     forms_succeeded: int = 0
+    submissions_found: int = 0
     form_errors: Dict[str, str] = field(default_factory=dict)
     converted_files: List[Path] = field(default_factory=list)
     skipped_unparseable: int = 0
@@ -257,7 +258,13 @@ def download_and_convert_sec_filings(
     on_status: Optional[Callable[[str], None]] = None,
 ) -> SecDownloadResult:
     """Download SEC filings via `datamule`, filter junk, clean tables, and save Markdown."""
-    from datamule import Portfolio
+    try:
+        from datamule import Portfolio
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing required package 'datamule'. Install dependencies with: "
+            "pip install -r requirements.txt"
+        ) from exc
 
     clean_ticker = sanitize_ticker(ticker)
     forms = list(dict.fromkeys(f.strip().upper() for f in form_codes if f.strip()))
@@ -325,6 +332,8 @@ def download_and_convert_sec_filings(
         # Filter by year BEFORE parsing markdown (huge speed win)
         if _extract_year(period, filing_date) < cutoff_year:
             continue
+
+        result.submissions_found += 1
 
         for doc in submission:
             doc_type = (doc.type or "").upper()

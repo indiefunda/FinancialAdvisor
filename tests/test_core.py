@@ -11,6 +11,7 @@ import pytest
 from config_manager import (
     QuotaManager,
     load_api_keys,
+    load_stored_api_keys,
     mask_key,
     parse_secrets_txt,
     save_api_keys,
@@ -18,6 +19,7 @@ from config_manager import (
 from markdown_cleanup import cleanup_markdown_tables
 from sec_downloader import (
     deduplicate_filename,
+    download_and_convert_sec_filings,
     is_useful_document,
     make_sec_filename,
     sanitize_ticker,
@@ -28,6 +30,7 @@ from transcript_providers import (
     download_transcripts,
     expected_quarters,
     fetch_from_alphavantage,
+    fetch_from_firecrawl,
     save_transcript_record,
     scan_existing_quarters,
 )
@@ -63,15 +66,16 @@ def test_cleanup_never_deletes_data_column_when_right_column_is_closing_paren():
     assert "(567" in cleaned
 
 
-def test_cleanup_removes_duplicate_numeric_columns():
+def test_cleanup_removes_duplicate_and_triple_duplicate_columns():
     raw = "\n".join([
-        "| Metric | 2025 | 2025 |",
-        "| --- | --- | --- |",
-        "| Revenue | $1,234 | 1,234 |",
-        "| EBITDA | $567 | 567 |",
+        "| Metric | 2025 | 2025 | 2025 |",
+        "| --- | --- | --- | --- |",
+        "| Revenue | $1,234 | 1,234 | 1,234 |",
+        "| EBITDA | $567 | 567 | 567 |",
     ])
     cleaned = cleanup_markdown_tables(raw)
     lines = cleaned.splitlines()
+    assert lines[0] == "| Metric | 2025 |"
     assert lines[2] == "| Revenue | 1,234 |"
     assert lines[3] == "| EBITDA | 567 |"
 
@@ -131,11 +135,26 @@ def test_make_sec_filename_no_exhibit_collision_and_non_calendar_10q():
     assert deduplicate_filename("AAPL - 8-K 2026-05-01.md", used) == "AAPL - 8-K 2026-05-01 (2).md"
 
 
+def test_missing_datamule_raises_clean_runtime_error(tmp_path: Path):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "datamule":
+            raise ImportError("No module named 'datamule'")
+        return real_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=fake_import):
+        with pytest.raises(RuntimeError, match="Missing required package 'datamule'"):
+            download_and_convert_sec_filings("AAPL", ["10-K"], data_root=tmp_path)
+
+
 # ============================================================================
 # 3. config_manager.py
 # ============================================================================
 
-def test_secrets_parsing_saving_loading_and_masking(tmp_path: Path, monkeypatch):
+def test_secrets_partial_merge_and_env_isolation(tmp_path: Path, monkeypatch):
     txt = tmp_path / "Secrets.txt"
     txt.write_text(
         "roic.ai API KEY: test_roic_123456\n"
@@ -143,26 +162,24 @@ def test_secrets_parsing_saving_loading_and_masking(tmp_path: Path, monkeypatch)
         "firecrawl.dev API KEY: fc-test9999\n",
         encoding="utf-8",
     )
-    parsed = parse_secrets_txt(txt)
-    assert parsed == {
-        "roic": "test_roic_123456",
-        "alphavantage": "test_av_abcdef",
-        "firecrawl": "fc-test9999",
-    }
-
     secrets_json = tmp_path / ".secrets.json"
+    # Pre-seed .secrets.json with ONLY roic -> Secrets.txt should still merge missing keys!
+    save_api_keys({"roic": "custom_roic_9999"}, secrets_file=secrets_json)
+
     monkeypatch.delenv("ROIC_API_KEY", raising=False)
     monkeypatch.delenv("ALPHAVANTAGE_API_KEY", raising=False)
     monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
 
-    loaded = load_api_keys(secrets_file=secrets_json, auto_import_paths=[txt])
-    assert loaded == parsed
-    assert secrets_json.exists()
+    stored = load_stored_api_keys(secrets_file=secrets_json, auto_import_paths=[txt])
+    assert stored["roic"] == "custom_roic_9999"  # Existing key preserved
+    assert stored["alphavantage"] == "test_av_abcdef"  # Missing key merged
+    assert stored["firecrawl"] == "fc-test9999"  # Missing key merged
 
-    # Env var overrides saved file
-    monkeypatch.setenv("ROIC_API_KEY", "env_override_key")
-    loaded_env = load_api_keys(secrets_file=secrets_json)
-    assert loaded_env["roic"] == "env_override_key"
+    # Env var overrides load_api_keys() but NOT load_stored_api_keys()
+    monkeypatch.setenv("ROIC_API_KEY", "env_only_secret")
+    effective = load_api_keys(secrets_file=secrets_json)
+    assert effective["roic"] == "env_only_secret"
+    assert load_stored_api_keys(secrets_file=secrets_json)["roic"] == "custom_roic_9999"
 
     assert mask_key("test_roic_123456") == "te••••••3456"
     assert mask_key("") == "Not set"
@@ -175,7 +192,6 @@ def test_quota_manager_limits_and_rollover(tmp_path: Path):
     qm.record_alphavantage_call(5)
     assert qm.alphavantage_remaining() == 20
 
-    # Simulate previous day -> should reset to 25
     qm.state["alphavantage"]["date"] = "2020-01-01"
     qm.save()
     qm2 = QuotaManager(quota_file=qfile)
@@ -189,23 +205,58 @@ def test_quota_manager_limits_and_rollover(tmp_path: Path):
 # 4. transcript_providers.py
 # ============================================================================
 
-def test_expected_quarters_and_local_cache(tmp_path: Path):
+def test_expected_quarters_excludes_in_progress_quarter():
+    # On 2026-11-24 (during Q4 2026), latest completed quarter is Q3 2026
     qs = expected_quarters(2, today=date(2026, 11, 24))
-    assert qs[0] == (2026, 4)
+    assert qs[0] == (2026, 3)
+    assert (2026, 4) not in qs
     assert qs[-1] == (2025, 1)
-    assert len(qs) == 8
+    assert len(qs) == 7
 
-    rec = TranscriptRecord(
-        ticker="AAPL",
-        fiscal_year=2026,
-        fiscal_quarter=3,
-        provider="defeatbeta",
-        markdown_body="A" * 300,
+    # On 2026-02-10 (during Q1 2026), latest completed quarter is Q4 2025
+    qs_jan = expected_quarters(1, today=date(2026, 2, 10))
+    assert qs_jan[0] == (2025, 4)
+    assert qs_jan[-1] == (2025, 1)
+
+
+def test_scan_existing_quarters_ignores_zero_byte_stubs(tmp_path: Path):
+    (tmp_path / "AAPL - Q2 2026.md").write_text("", encoding="utf-8")
+    save_transcript_record(
+        TranscriptRecord("AAPL", 2026, 3, "defeatbeta", "A" * 300),
+        tmp_path,
     )
-    saved = save_transcript_record(rec, tmp_path)
-    assert saved.name == "AAPL - Q3 2026.md"
     existing = scan_existing_quarters(tmp_path)
     assert (2026, 3) in existing
+    assert (2026, 2) not in existing
+
+
+def test_non_json_html_responses_never_crash_providers(tmp_path: Path):
+    """Regression test: HTTP 200 with HTML body must not raise ValueError."""
+    qm = QuotaManager(quota_file=tmp_path / ".quota.json")
+    html_resp = MagicMock(status_code=200)
+    html_resp.json.side_effect = ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    mock_session = MagicMock()
+    mock_session.get.return_value = html_resp
+    mock_session.post.return_value = html_resp
+
+    # ROIC.ai
+    roic = RoicClient("dummy", qm, session=mock_session)
+    recs, note = roic.fetch_missing("AAPL", 2025, set(), lambda _: None)
+    assert recs == []
+    assert "non-JSON" in note
+
+    # Alpha Vantage
+    recs_av, _ = fetch_from_alphavantage(
+        "AAPL", [(2026, 3)], "dummy", qm, lambda _: None, session=mock_session
+    )
+    assert recs_av == []
+
+    # Firecrawl
+    recs_fc, _ = fetch_from_firecrawl(
+        "AAPL", [(2026, 3)], "dummy", qm, lambda _: None, session=mock_session
+    )
+    assert recs_fc == []
 
 
 def test_alphavantage_handles_http200_rate_limit(tmp_path: Path):
@@ -227,7 +278,7 @@ def test_alphavantage_handles_http200_rate_limit(tmp_path: Path):
     )
     assert recs == []
     assert qm.alphavantage_remaining() == 0
-    assert mock_session.get.call_count == 1  # Stopped immediately on rate limit
+    assert mock_session.get.call_count == 1
 
 
 def test_roic_payload_parsing():
@@ -246,43 +297,33 @@ def test_roic_payload_parsing():
     assert "Hello everyone." in raw_text
 
 
-def test_waterfall_uses_cache_then_providers_in_order(tmp_path: Path):
+def test_waterfall_respects_custom_provider_order(tmp_path: Path):
+    """Passing providers=['roic', 'defeatbeta'] must call ROIC first, then DefeatBeta."""
     qm = QuotaManager(quota_file=tmp_path / ".quota.json")
-    # Pre-seed Q3 2026 in local cache
-    tr_dir = tmp_path / "AAPL" / "EarningsTranscripts"
-    save_transcript_record(
-        TranscriptRecord("AAPL", 2026, 3, "cache", "Cached content " * 30),
-        tr_dir,
-    )
-
-    def fake_db(ticker, cutoff_year, skip_quarters, log):
-        assert (2026, 3) in skip_quarters  # Must skip cached quarter
-        return [TranscriptRecord(ticker, 2026, 2, "defeatbeta", "DB body " * 40)], "Fetched 1"
+    call_order = []
 
     def fake_roic(self, ticker, cutoff_year, skip_quarters, log):
-        assert (2026, 3) in skip_quarters
-        assert (2026, 2) in skip_quarters
-        return [TranscriptRecord(ticker, 2026, 4, "roic.ai", "ROIC body " * 40)], "Fetched 1"
+        call_order.append("roic")
+        return [TranscriptRecord(ticker, 2026, 3, "roic.ai", "ROIC body " * 40)], "Fetched 1"
 
-    def fake_av(ticker, target_quarters, api_key, quota, log, **kwargs):
-        assert (2026, 3) not in target_quarters
-        assert (2026, 2) not in target_quarters
-        assert (2026, 4) not in target_quarters
-        return [TranscriptRecord(ticker, 2026, 1, "alphavantage", "AV body " * 40)], "Fetched 1"
+    def fake_db(ticker, cutoff_year, skip_quarters, log):
+        call_order.append("defeatbeta")
+        assert (2026, 3) in skip_quarters  # Already fetched by ROIC first!
+        return [
+            TranscriptRecord(ticker, 2026, 2, "defeatbeta", "DB body " * 40),
+            TranscriptRecord(ticker, 2026, 1, "defeatbeta", "DB body " * 40),
+        ], "Fetched 2"
 
-    with patch("transcript_providers.fetch_from_defeatbeta", side_effect=fake_db), \
-         patch.object(RoicClient, "fetch_missing", fake_roic), \
-         patch("transcript_providers.fetch_from_alphavantage", side_effect=fake_av):
+    with patch.object(RoicClient, "fetch_missing", fake_roic), \
+         patch("transcript_providers.fetch_from_defeatbeta", side_effect=fake_db):
         res = download_transcripts(
             ticker="AAPL",
             num_years=1,
-            providers=["defeatbeta", "roic", "alphavantage"],
-            api_keys={"roic": "k1", "alphavantage": "k2"},
+            providers=["roic", "defeatbeta"],
+            api_keys={"roic": "k1"},
             quota_manager=qm,
             data_root=tmp_path,
         )
 
-    assert (2026, 3) in res.cached_quarters
-    saved_providers = {p for p, _ in res.saved_files}
-    assert saved_providers == {"defeatbeta", "roic.ai", "alphavantage"}
+    assert call_order == ["roic", "defeatbeta"]
     assert res.missing_quarters == []

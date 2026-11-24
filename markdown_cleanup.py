@@ -133,22 +133,19 @@ def _dedupe_table_columns(rows: List[List[str]]) -> List[List[str]]:
         return rows
 
     keep_mask = [True] * n_cols
-    i = 0
-    while i + 1 < n_cols:
-        if not keep_mask[i] or not keep_mask[i + 1]:
-            i += 1
-            continue
-        left_col = [r[i] for r in data_rows]
-        right_col = [r[i + 1] for r in data_rows]
+    left_idx = 0
+    for right_idx in range(1, n_cols):
+        left_col = [r[left_idx] for r in data_rows]
+        right_col = [r[right_idx] for r in data_rows]
         drop = _choose_column_to_drop(left_col, right_col)
         if drop == "left":
-            keep_mask[i] = False
-            i += 2
+            keep_mask[left_idx] = False
+            left_idx = right_idx
         elif drop == "right":
-            keep_mask[i + 1] = False
-            i += 2
+            keep_mask[right_idx] = False
+            # Keep left_idx anchored to compare against subsequent columns
         else:
-            i += 1
+            left_idx = right_idx
 
     if all(keep_mask):
         return rows

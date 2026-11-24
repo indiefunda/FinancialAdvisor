@@ -10,10 +10,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).parent.resolve()
 SECRETS_FILE = REPO_ROOT / ".secrets.json"
@@ -87,22 +88,34 @@ def parse_secrets_txt(path: Path) -> Dict[str, str]:
 
 
 def _write_json_private(path: Path, data: Dict[str, Any]) -> None:
-    """Write JSON atomically and restrict permissions on POSIX systems."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    """Write JSON atomically using a unique temp file and restrict POSIX permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
     try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    tmp.replace(path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
-def load_api_keys(
+def load_stored_api_keys(
     secrets_file: Path = SECRETS_FILE,
     auto_import_paths: Optional[List[Path]] = None,
 ) -> Dict[str, str]:
-    """Load API keys from `.secrets.json`, auto-importing `Secrets.txt` if needed,
-    then overlaying non-empty environment variables.
+    """Load persisted API keys from `.secrets.json` (without env-var overlay).
+
+    If `Secrets.txt` contains keys for providers not yet in `.secrets.json`,
+    those missing keys are merged in automatically.
     """
     keys: Dict[str, str] = {}
 
@@ -116,26 +129,51 @@ def load_api_keys(
         except (OSError, json.JSONDecodeError):
             pass
 
-    if not keys:
-        candidates = auto_import_paths or [
-            REPO_ROOT / "Secrets.txt",
-            REPO_ROOT / "secrets.txt",
-        ]
-        for cand in candidates:
-            imported = parse_secrets_txt(cand)
-            if imported:
-                keys.update(imported)
-                save_api_keys(keys, secrets_file=secrets_file)
-                break
+    candidates = auto_import_paths or [
+        REPO_ROOT / "Secrets.txt",
+        REPO_ROOT / "secrets.txt",
+    ]
+    merged_any = False
+    for cand in candidates:
+        imported = parse_secrets_txt(cand)
+        for prov, val in imported.items():
+            if prov not in keys and val:
+                keys[prov] = val
+                merged_any = True
+    if merged_any:
+        save_api_keys(keys, secrets_file=secrets_file)
 
-    # Environment variables always take precedence if explicitly set
+    return keys
+
+
+def load_api_keys_with_sources(
+    secrets_file: Path = SECRETS_FILE,
+    auto_import_paths: Optional[List[Path]] = None,
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Return `(keys, sources)` where `sources[provider]` is `'env'` or `'file'`."""
+    keys = load_stored_api_keys(secrets_file=secrets_file, auto_import_paths=auto_import_paths)
+    sources: Dict[str, str] = {k: "file" for k in keys}
+
     for provider, spec in PROVIDER_SPECS.items():
         env_var = spec.get("env_var")
         if env_var:
             val = os.environ.get(env_var, "").strip()
             if val:
                 keys[provider] = val
+                sources[provider] = "env"
 
+    return keys, sources
+
+
+def load_api_keys(
+    secrets_file: Path = SECRETS_FILE,
+    auto_import_paths: Optional[List[Path]] = None,
+) -> Dict[str, str]:
+    """Load effective API keys (stored file + environment variable overrides)."""
+    keys, _ = load_api_keys_with_sources(
+        secrets_file=secrets_file,
+        auto_import_paths=auto_import_paths,
+    )
     return keys
 
 
@@ -150,7 +188,10 @@ def save_api_keys(keys: Dict[str, str], secrets_file: Path = SECRETS_FILE) -> No
 
 
 class QuotaManager:
-    """Tracks local API usage to respect free-tier limits across runs."""
+    """Tracks local API usage to respect free-tier limits across runs.
+
+    All default limits are read directly from `PROVIDER_SPECS` (single source of truth).
+    """
 
     def __init__(self, quota_file: Path = QUOTA_FILE):
         self.quota_file = quota_file
@@ -206,16 +247,19 @@ class QuotaManager:
         self.state = self._default_state()
         self.save()
 
-    # ── ROIC.ai (5 req/min free tier) ─────────────────────────────────
-    def roic_wait_if_needed(self, max_rpm: int = 5) -> float:
-        """Sleep politely if 5 requests have been made in the last 60s.
-        Returns seconds slept.
-        """
+    # ── ROIC.ai ────────────────────────────────────────────────────────
+    @property
+    def roic_rpm_limit(self) -> int:
+        return int(PROVIDER_SPECS["roic"]["rpm_limit"])
+
+    def roic_wait_if_needed(self, max_rpm: Optional[int] = None) -> float:
+        """Sleep politely if RPM limit has been reached in the last 60s."""
+        limit = max_rpm if max_rpm is not None else self.roic_rpm_limit
         self._rollover(self.state)
         ts = self.state["roic"]["timestamps"]
         now = time.time()
         recent = [t for t in ts if now - t < 61.0]
-        if len(recent) >= max_rpm:
+        if len(recent) >= limit:
             oldest = min(recent)
             wait = max(0.0, 61.5 - (now - oldest))
             if wait > 0:
@@ -228,12 +272,17 @@ class QuotaManager:
         self.state["roic"]["timestamps"].append(time.time())
         self.save()
 
-    # ── Alpha Vantage (25 req/day free tier) ──────────────────────────
-    def alphavantage_remaining(self, daily_limit: int = 25) -> int:
-        self._rollover(self.state)
-        return max(0, daily_limit - int(self.state["alphavantage"].get("used", 0)))
+    # ── Alpha Vantage ──────────────────────────────────────────────────
+    @property
+    def alphavantage_daily_limit(self) -> int:
+        return int(PROVIDER_SPECS["alphavantage"]["daily_limit"])
 
-    def can_call_alphavantage(self, daily_limit: int = 25) -> bool:
+    def alphavantage_remaining(self, daily_limit: Optional[int] = None) -> int:
+        limit = daily_limit if daily_limit is not None else self.alphavantage_daily_limit
+        self._rollover(self.state)
+        return max(0, limit - int(self.state["alphavantage"].get("used", 0)))
+
+    def can_call_alphavantage(self, daily_limit: Optional[int] = None) -> bool:
         return self.alphavantage_remaining(daily_limit) > 0
 
     def record_alphavantage_call(self, count: int = 1) -> None:
@@ -241,17 +290,23 @@ class QuotaManager:
         self.state["alphavantage"]["used"] = int(self.state["alphavantage"].get("used", 0)) + count
         self.save()
 
-    def mark_alphavantage_exhausted(self, daily_limit: int = 25) -> None:
+    def mark_alphavantage_exhausted(self, daily_limit: Optional[int] = None) -> None:
+        limit = daily_limit if daily_limit is not None else self.alphavantage_daily_limit
         self._rollover(self.state)
-        self.state["alphavantage"]["used"] = daily_limit
+        self.state["alphavantage"]["used"] = limit
         self.save()
 
-    # ── Firecrawl (1,000 credits/month free tier) ─────────────────────
-    def firecrawl_remaining(self, monthly_limit: int = 1000) -> int:
-        self._rollover(self.state)
-        return max(0, monthly_limit - int(self.state["firecrawl"].get("credits_used", 0)))
+    # ── Firecrawl ──────────────────────────────────────────────────────
+    @property
+    def firecrawl_monthly_limit(self) -> int:
+        return int(PROVIDER_SPECS["firecrawl"]["monthly_credit_limit"])
 
-    def can_call_firecrawl(self, cost: int = 2, monthly_limit: int = 1000) -> bool:
+    def firecrawl_remaining(self, monthly_limit: Optional[int] = None) -> int:
+        limit = monthly_limit if monthly_limit is not None else self.firecrawl_monthly_limit
+        self._rollover(self.state)
+        return max(0, limit - int(self.state["firecrawl"].get("credits_used", 0)))
+
+    def can_call_firecrawl(self, cost: int = 2, monthly_limit: Optional[int] = None) -> bool:
         return self.firecrawl_remaining(monthly_limit) >= cost
 
     def record_firecrawl_credits(self, credits: int = 1) -> None:
@@ -264,21 +319,24 @@ class QuotaManager:
     def summary(self) -> Dict[str, Dict[str, Any]]:
         """Return human-readable quota status for UI display."""
         self._rollover(self.state)
+        roic_lim = self.roic_rpm_limit
+        av_lim = self.alphavantage_daily_limit
+        fc_lim = self.firecrawl_monthly_limit
         return {
             "defeatbeta": {"used": 0, "limit": "Unlimited", "remaining": "Unlimited"},
             "roic": {
                 "used": len(self.state["roic"]["timestamps"]),
-                "limit": "5 / min",
-                "remaining": f"{max(0, 5 - len(self.state['roic']['timestamps']))} / min",
+                "limit": f"{roic_lim} / min",
+                "remaining": f"{max(0, roic_lim - len(self.state['roic']['timestamps']))} / min",
             },
             "alphavantage": {
                 "used": self.state["alphavantage"]["used"],
-                "limit": "25 / day",
+                "limit": f"{av_lim} / day",
                 "remaining": f"{self.alphavantage_remaining()} / day",
             },
             "firecrawl": {
                 "used": self.state["firecrawl"]["credits_used"],
-                "limit": "1,000 credits / mo",
-                "remaining": f"{self.firecrawl_remaining()} credits / mo",
+                "limit": f"{fc_lim:,} credits / mo",
+                "remaining": f"{self.firecrawl_remaining():,} credits / mo",
             },
         }

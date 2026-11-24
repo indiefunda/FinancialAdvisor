@@ -1,5 +1,4 @@
 streamlit>=1.32.0,<2.0.0
 datamule>=0.1.0,<2.0.0
 requests>=2.31.0,<3.0.0
-defeatbeta-api>=0.0.61
-pytest>=8.0.0
+defeatbeta-api>=0.0.61,<1.0.0

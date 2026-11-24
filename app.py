@@ -198,25 +198,36 @@ with tab_sec:
             except ValueError as err:
                 st.error(str(err))
             else:
-                with st.status(f"Downloading SEC filings for {clean_t}...", expanded=True) as status:
-                    res = download_and_convert_sec_filings(
-                        ticker=clean_t,
-                        form_codes=selected_forms,
-                        num_years=int(sec_years),
-                        on_status=lambda m: status.write(m),
-                    )
-                    status.update(label="SEC download & conversion complete", state="complete")
-
-                st.success(
-                    f"Downloaded {res.forms_succeeded}/{res.forms_requested} form types. "
-                    f"Converted **{len(res.converted_files)}** cleaned Markdown documents "
-                    f"(skipped {res.skipped_unparseable} unparseable)."
-                )
-                if res.form_errors:
-                    with st.expander(f"⚠️ Warnings / Skipped Forms ({len(res.form_errors)})"):
-                        for form, msg in res.form_errors.items():
-                            st.warning(f"**{form}**: {msg}")
-                st.info(f"Markdown saved to: `{res.markdown_dir}`")
+                try:
+                    with st.status(f"Downloading SEC filings for {clean_t}...", expanded=True) as status:
+                        res = download_and_convert_sec_filings(
+                            ticker=clean_t,
+                            form_codes=selected_forms,
+                            num_years=int(sec_years),
+                            on_status=lambda m: status.write(m),
+                        )
+                        status.update(label="SEC download & conversion complete", state="complete")
+                except Exception as exc:
+                    st.error(f"SEC download failed: {exc}")
+                else:
+                    if res.converted_files:
+                        st.success(
+                            f"Found **{res.submissions_found}** submission(s) across "
+                            f"{res.forms_succeeded}/{res.forms_requested} queried form types. "
+                            f"Converted **{len(res.converted_files)}** cleaned Markdown documents "
+                            f"(skipped {res.skipped_unparseable} unparseable)."
+                        )
+                    else:
+                        st.warning(
+                            f"Queried {res.forms_succeeded}/{res.forms_requested} form types, "
+                            f"but 0 convertible filings were found for `{clean_t}` in the last "
+                            f"{int(sec_years)} year(s)."
+                        )
+                    if res.form_errors:
+                        with st.expander(f"⚠️ Warnings / Skipped Forms ({len(res.form_errors)})"):
+                            for form, msg in res.form_errors.items():
+                                st.warning(f"**{form}**: {msg}")
+                    st.info(f"Markdown saved to: `{res.markdown_dir}`")
 
 
 # ============================================================================

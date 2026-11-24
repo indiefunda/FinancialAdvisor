@@ -1,11 +1,11 @@
 """Multi-provider, quota-aware earnings call transcript downloader.
 
 Implements a redundancy waterfall designed to maximize free-tier API allowances:
-  0. Local disk cache     — 0 API calls for quarters already downloaded
+  0. Local disk cache     — 0 API calls for valid transcripts already downloaded
   1. DefeatBeta (HF)      — Unlimited, 0 credits, 10+ yrs, speaker-labeled
   2. ROIC.ai API v3       — 5 req/min, latest 2 calls (~1h after call)
   3. Alpha Vantage        — 25 req/day, any quarter since 2010Q1, speaker + sentiment
-  4. Firecrawl (v2)       — 1,000 credits/mo, last-resort web/Alexandria fallback
+  4. Firecrawl (v2)       — 1,000 credits/mo, last-resort web fallback
 """
 
 from __future__ import annotations
@@ -21,12 +21,14 @@ import requests
 
 from config_manager import (
     DEFAULT_PROVIDER_ORDER,
+    PROVIDER_SPECS,
     QuotaManager,
     load_api_keys,
 )
 from sec_downloader import DEFAULT_DATA_ROOT, sanitize_ticker
 
 _EXISTING_FILE_RE = re.compile(r"Q([1-4])\s+(\d{4})\.md$", re.IGNORECASE)
+_MIN_CACHED_BYTES = 200
 
 
 @dataclass
@@ -52,25 +54,51 @@ class TranscriptRunResult:
     logs: List[str] = field(default_factory=list)
 
 
+def _safe_json(resp: requests.Response) -> Any:
+    """Parse JSON safely, returning None on HTML/non-JSON error pages."""
+    try:
+        return resp.json()
+    except (ValueError, TypeError):
+        return None
+
+
 def expected_quarters(num_years: int, today: Optional[date] = None) -> List[Tuple[int, int]]:
-    """Return `(year, quarter)` pairs for the last `num_years`, newest first."""
+    """Return completed `(year, quarter)` pairs for the last `num_years`, newest first.
+
+    Excludes the in-progress calendar quarter so quota-limited providers (Alpha Vantage,
+    Firecrawl) never burn calls on a quarter that has not ended yet. Listing-based
+    providers (DefeatBeta, ROIC.ai) still discover any already-reported fiscal quarters.
+    """
     ref = today or date.today()
     cutoff_year = ref.year - max(1, int(num_years)) + 1
     current_q = (ref.month - 1) // 3 + 1
+
+    # Latest completed calendar quarter
+    if current_q == 1:
+        latest_yr, latest_q = ref.year - 1, 4
+    else:
+        latest_yr, latest_q = ref.year, current_q - 1
+
+    start_yr = min(cutoff_year, latest_yr)
     quarters: List[Tuple[int, int]] = []
-    for yr in range(ref.year, cutoff_year - 1, -1):
-        max_q = current_q if yr == ref.year else 4
+    for yr in range(latest_yr, start_yr - 1, -1):
+        max_q = latest_q if yr == latest_yr else 4
         for q in range(max_q, 0, -1):
             quarters.append((yr, q))
     return quarters
 
 
 def scan_existing_quarters(transcripts_dir: Path) -> Dict[Tuple[int, int], Path]:
-    """Return a map of `(year, quarter) -> Path` for transcripts already on disk."""
+    """Return `(year, quarter) -> Path` for valid (non-empty) transcripts on disk."""
     found: Dict[Tuple[int, int], Path] = {}
     if not transcripts_dir.exists():
         return found
     for path in transcripts_dir.glob("*.md"):
+        try:
+            if path.stat().st_size < _MIN_CACHED_BYTES:
+                continue
+        except OSError:
+            continue
         m = _EXISTING_FILE_RE.search(path.name)
         if m:
             q, yr = int(m.group(1)), int(m.group(2))
@@ -210,7 +238,7 @@ class RoicClient:
         self._symbol_cache: Dict[str, str] = {}
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> requests.Response:
-        self.quota.roic_wait_if_needed(max_rpm=5)
+        self.quota.roic_wait_if_needed()
         query = dict(params or {})
         query["apikey"] = self.api_key
         resp = self.session.get(f"{self.BASE_URL}/{path.lstrip('/')}", params=query, timeout=30)
@@ -227,13 +255,14 @@ class RoicClient:
         try:
             resp = self._get("tickers/search", {"query": ticker, "limit": 10})
             if resp.status_code == 200:
-                payload = resp.json()
+                payload = _safe_json(resp)
                 items = payload.get("data", payload) if isinstance(payload, dict) else payload
                 if isinstance(items, list):
-                    # Prefer exact US ticker match (NASDAQ / NYSE / AMEX)
                     us_exchanges = {"NASDAQ", "NYSE", "AMEX", "NYSEARCA", "BATS"}
                     exact = []
                     for item in items:
+                        if not isinstance(item, dict):
+                            continue
                         sym = str(item.get("symbol", "") or "")
                         short = sym.split(":")[-1].upper()
                         if short == ticker.upper():
@@ -268,15 +297,20 @@ class RoicClient:
         if resp.status_code != 200:
             return [], f"ROIC.ai list returned HTTP {resp.status_code}"
 
-        payload = resp.json()
-        calls = payload.get("data", []) if isinstance(payload, dict) else []
-        if not calls:
+        payload = _safe_json(resp)
+        if not isinstance(payload, dict):
+            return [], "ROIC.ai returned non-JSON response on call listing"
+
+        calls = payload.get("data", [])
+        if not isinstance(calls, list) or not calls:
             return [], f"No earnings calls listed for {identifier}"
 
         records: List[TranscriptRecord] = []
         restricted_hits = 0
 
         for call in calls:
+            if not isinstance(call, dict):
+                continue
             try:
                 yr = int(call.get("fiscal_year") or 0)
                 q = int(call.get("fiscal_quarter") or 0)
@@ -308,7 +342,11 @@ class RoicClient:
                 log(f"  [ROIC.ai] Q{q} {yr} HTTP {tr_resp.status_code}")
                 continue
 
-            data = tr_resp.json()
+            data = _safe_json(tr_resp)
+            if data is None:
+                log(f"  [ROIC.ai] Q{q} {yr} returned non-JSON response — skipped")
+                continue
+
             body, has_speakers = self._parse_roic_payload(data)
             if len(body) > 200:
                 records.append(
@@ -332,7 +370,6 @@ class RoicClient:
     @staticmethod
     def _parse_roic_payload(data: Any) -> Tuple[str, bool]:
         if isinstance(data, dict):
-            # Structured turns list: [{"speaker": ..., "content": ...}]
             turns = data.get("transcript")
             if isinstance(turns, list) and turns:
                 parts: List[str] = []
@@ -352,7 +389,6 @@ class RoicClient:
                 if parts:
                     return "\n\n".join(parts), has_speakers
 
-            # Plain text field (raw transcript or text edition)
             for field_name in ("text", "content", "transcript"):
                 val = data.get(field_name)
                 if isinstance(val, str) and len(val.strip()) > 200:
@@ -376,20 +412,23 @@ def fetch_from_alphavantage(
 ) -> Tuple[List[TranscriptRecord], str]:
     """Fetch missing quarters from Alpha Vantage `EARNINGS_CALL_TRANSCRIPT`."""
     http = session or requests.Session()
+    min_interval = float(PROVIDER_SPECS["alphavantage"].get("min_interval_sec", 1.2))
+    daily_limit = quota.alphavantage_daily_limit
+
     records: List[TranscriptRecord] = []
     calls_made = 0
     consecutive_empty = 0
 
     for yr, q in target_quarters:
         if not quota.can_call_alphavantage():
-            log("  [Alpha Vantage] Daily free quota (25/day) reached — stopping.")
+            log(f"  [Alpha Vantage] Daily free quota ({daily_limit}/day) reached — stopping.")
             break
         if max_calls_this_run is not None and calls_made >= max_calls_this_run:
             log(f"  [Alpha Vantage] Per-run cap ({max_calls_this_run}) reached.")
             break
 
         if calls_made > 0:
-            time.sleep(1.2)  # Respect ~1 req/sec soft limit
+            time.sleep(min_interval)
 
         quarter_param = f"{yr}Q{q}"
         try:
@@ -413,15 +452,15 @@ def fetch_from_alphavantage(
             log(f"  [Alpha Vantage] {quarter_param} HTTP {resp.status_code}")
             continue
 
-        data = resp.json()
+        data = _safe_json(resp)
         if not isinstance(data, dict):
+            log(f"  [Alpha Vantage] {quarter_param} returned non-JSON response — skipped")
             continue
 
-        # Alpha Vantage returns HTTP 200 with Information / Note on rate limits
         info_msg = str(data.get("Information") or data.get("Note") or "")
         if info_msg:
             lower = info_msg.lower()
-            if "rate limit" in lower or "25 requests per day" in lower or "spreading out" in lower:
+            if "rate limit" in lower or "requests per day" in lower or "spreading out" in lower:
                 quota.mark_alphavantage_exhausted()
                 log(f"  [Alpha Vantage] Rate limit reached: {info_msg[:120]}")
                 break
@@ -436,7 +475,6 @@ def fetch_from_alphavantage(
         if not isinstance(turns, list) or not turns:
             consecutive_empty += 1
             log(f"  [Alpha Vantage] {quarter_param}: no transcript available")
-            # Avoid burning daily quota on unsupported tickers after 3 empty quarters
             if consecutive_empty >= 3 and len(records) == 0:
                 log("  [Alpha Vantage] 3 consecutive empty quarters — stopping to save daily quota.")
                 break
@@ -477,7 +515,10 @@ def fetch_from_alphavantage(
             log(f"  [Alpha Vantage] {quarter_param} fetched ({len(body):,} chars)")
 
     remaining = quota.alphavantage_remaining()
-    return records, f"Fetched {len(records)} quarter(s) ({calls_made} calls used, {remaining}/25 left today)"
+    return (
+        records,
+        f"Fetched {len(records)} quarter(s) ({calls_made} calls used, {remaining}/{daily_limit} left today)",
+    )
 
 
 # ============================================================================
@@ -538,7 +579,11 @@ def fetch_from_firecrawl(
                 break
             continue
 
-        search_json = search_resp.json()
+        search_json = _safe_json(search_resp)
+        if not isinstance(search_json, dict):
+            log(f"  [Firecrawl] Q{q} {yr} search returned non-JSON response — skipped")
+            continue
+
         raw_results = search_json.get("data", [])
         if isinstance(raw_results, dict):
             raw_results = raw_results.get("web", [])
@@ -546,7 +591,6 @@ def fetch_from_firecrawl(
             log(f"  [Firecrawl] Q{q} {yr}: no web results found")
             continue
 
-        # Rank results preferring known transcript publishers
         def _rank(item: Dict[str, Any]) -> Tuple[int, int]:
             url = str(item.get("url") or "").lower()
             title = str(item.get("title") or "").lower()
@@ -584,7 +628,12 @@ def fetch_from_firecrawl(
             log(f"  [Firecrawl] Q{q} {yr} scrape HTTP {scrape_resp.status_code}")
             continue
 
-        scrape_data = scrape_resp.json().get("data", {})
+        scrape_json = _safe_json(scrape_resp)
+        scrape_data = scrape_json.get("data", {}) if isinstance(scrape_json, dict) else {}
+        if not isinstance(scrape_data, dict):
+            log(f"  [Firecrawl] Q{q} {yr} scrape returned unexpected payload — skipped")
+            continue
+
         md_text = str(scrape_data.get("markdown") or "").strip()
         if len(md_text) >= 1500:
             records.append(
@@ -606,7 +655,7 @@ def fetch_from_firecrawl(
 
 
 # ============================================================================
-# ORCHESTRATOR: Smart Redundancy Waterfall
+# ORCHESTRATOR: Smart Redundancy Waterfall (Respects Exact Provider Order)
 # ============================================================================
 
 def download_transcripts(
@@ -626,7 +675,11 @@ def download_transcripts(
 
     keys = api_keys if api_keys is not None else load_api_keys()
     quota = quota_manager or QuotaManager()
-    enabled = list(providers) if providers is not None else list(DEFAULT_PROVIDER_ORDER)
+    enabled = (
+        list(dict.fromkeys(p.strip().lower() for p in providers if p.strip()))
+        if providers is not None
+        else list(DEFAULT_PROVIDER_ORDER)
+    )
 
     result = TranscriptRunResult(ticker=clean_ticker, output_dir=transcripts_dir)
 
@@ -647,7 +700,9 @@ def download_transcripts(
             result.cached_quarters.append(q_key)
 
     if result.cached_quarters:
-        _log(f"Local cache hit: {len(result.cached_quarters)} quarter(s) already on disk (0 API calls).")
+        _log(
+            f"Local cache hit: {len(result.cached_quarters)} quarter(s) already on disk (0 API calls)."
+        )
 
     def _missing() -> List[Tuple[int, int]]:
         return [q_key for q_key in targets if q_key not in acquired]
@@ -661,54 +716,58 @@ def download_transcripts(
             acquired.add(key)
             result.saved_files.append((rec.provider, out_path))
 
-    # ── Step 1: DefeatBeta (Unlimited, Free, Multi-Year) ───────────────
-    if "defeatbeta" in enabled and _missing():
-        _log("Checking DefeatBeta (Hugging Face open dataset — unlimited)...")
-        recs, note = fetch_from_defeatbeta(clean_ticker, cutoff_year, acquired, _log)
-        _save_records(recs)
-        result.provider_notes["defeatbeta"] = note
+    # ── Run enabled providers in the exact order requested ─────────────
+    for prov in enabled:
+        if not _missing():
+            break
 
-    # ── Step 2: ROIC.ai (5 req/min, Latest 2 Calls) ────────────────────
-    if "roic" in enabled and _missing():
-        roic_key = keys.get("roic", "").strip()
-        if roic_key:
-            _log("Checking ROIC.ai API v3 (latest calls, 5 req/min)...")
-            client = RoicClient(roic_key, quota)
-            recs, note = client.fetch_missing(clean_ticker, cutoff_year, acquired, _log)
+        if prov == "defeatbeta":
+            _log("Checking DefeatBeta (Hugging Face open dataset — unlimited)...")
+            recs, note = fetch_from_defeatbeta(clean_ticker, cutoff_year, acquired, _log)
             _save_records(recs)
-            result.provider_notes["roic"] = note
-        else:
-            result.provider_notes["roic"] = "Skipped (no API key configured)"
+            result.provider_notes["defeatbeta"] = note
 
-    # ── Step 3: Alpha Vantage (25 req/day, Full History) ───────────────
-    if "alphavantage" in enabled and _missing():
-        av_key = keys.get("alphavantage", "").strip()
-        if av_key:
-            missing_now = _missing()
-            _log(
-                f"Checking Alpha Vantage for {len(missing_now)} remaining quarter(s) "
-                f"({quota.alphavantage_remaining()}/25 daily calls left)..."
-            )
-            recs, note = fetch_from_alphavantage(clean_ticker, missing_now, av_key, quota, _log)
-            _save_records(recs)
-            result.provider_notes["alphavantage"] = note
-        else:
-            result.provider_notes["alphavantage"] = "Skipped (no API key configured)"
+        elif prov == "roic":
+            roic_key = keys.get("roic", "").strip()
+            if roic_key:
+                _log(f"Checking ROIC.ai API v3 (latest calls, {quota.roic_rpm_limit} req/min)...")
+                client = RoicClient(roic_key, quota)
+                recs, note = client.fetch_missing(clean_ticker, cutoff_year, acquired, _log)
+                _save_records(recs)
+                result.provider_notes["roic"] = note
+            else:
+                result.provider_notes["roic"] = "Skipped (no API key configured)"
 
-    # ── Step 4: Firecrawl (1,000 credits/mo, Last-Resort Fallback) ─────
-    if "firecrawl" in enabled and _missing():
-        fc_key = keys.get("firecrawl", "").strip()
-        if fc_key:
-            missing_now = _missing()
-            _log(
-                f"Trying Firecrawl fallback for up to 2 of {len(missing_now)} missing quarter(s) "
-                f"({quota.firecrawl_remaining()} credits left this month)..."
-            )
-            recs, note = fetch_from_firecrawl(clean_ticker, missing_now, fc_key, quota, _log)
-            _save_records(recs)
-            result.provider_notes["firecrawl"] = note
+        elif prov == "alphavantage":
+            av_key = keys.get("alphavantage", "").strip()
+            if av_key:
+                missing_now = _missing()
+                _log(
+                    f"Checking Alpha Vantage for {len(missing_now)} remaining quarter(s) "
+                    f"({quota.alphavantage_remaining()}/{quota.alphavantage_daily_limit} daily calls left)..."
+                )
+                recs, note = fetch_from_alphavantage(clean_ticker, missing_now, av_key, quota, _log)
+                _save_records(recs)
+                result.provider_notes["alphavantage"] = note
+            else:
+                result.provider_notes["alphavantage"] = "Skipped (no API key configured)"
+
+        elif prov == "firecrawl":
+            fc_key = keys.get("firecrawl", "").strip()
+            if fc_key:
+                missing_now = _missing()
+                _log(
+                    f"Trying Firecrawl fallback for up to 2 of {len(missing_now)} missing quarter(s) "
+                    f"({quota.firecrawl_remaining():,} credits left this month)..."
+                )
+                recs, note = fetch_from_firecrawl(clean_ticker, missing_now, fc_key, quota, _log)
+                _save_records(recs)
+                result.provider_notes["firecrawl"] = note
+            else:
+                result.provider_notes["firecrawl"] = "Skipped (no API key configured)"
+
         else:
-            result.provider_notes["firecrawl"] = "Skipped (no API key configured)"
+            result.provider_notes[prov] = f"Unknown provider '{prov}' — skipped"
 
     result.missing_quarters = _missing()
     return result
