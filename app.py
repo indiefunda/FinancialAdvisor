@@ -15,7 +15,7 @@ from ai_analyst import (
     VALUATION_PROTOCOL_PATH,
     ValuationParameters,
     build_dossier_context,
-    call_deepseek,
+    call_deepseek_full,
     estimate_cost_usd,
     list_dossier_files,
     load_valuation_protocol,
@@ -39,6 +39,7 @@ from fundamentals import (
     generate_peers_report,
     generate_sec_coverage_audit,
     generate_valuation_bundle,
+    generate_valuation_pack,
 )
 from sec_downloader import (
     DEFAULT_DATA_ROOT,
@@ -495,29 +496,144 @@ with tab_ai:
         else []
     )
 
-    if not available_tickers:
-        st.info(
-            "No local ticker folders found in `data/` yet. Generate a Company Brief / DCF or download "
-            "transcripts & SEC filings first."
+    a1, a2, a3 = st.columns([1, 1, 2])
+    with a1:
+        ticker_options = available_tickers + ["➕ Enter new ticker..."]
+        picked = st.selectbox("Select Ticker Dossier", ticker_options, key="ai_ticker_pick")
+    with a2:
+        if picked == "➕ Enter new ticker...":
+            raw_new_tk = st.text_input("New Ticker Symbol", value="HUIZ", key="ai_new_ticker")
+            ai_ticker = sanitize_ticker(raw_new_tk) if raw_new_tk.strip() else ""
+        else:
+            ai_ticker = picked
+            st.text_input("Active Ticker", value=ai_ticker, disabled=True, key="ai_active_ticker_ro")
+    with a3:
+        ai_model = st.selectbox(
+            "DeepSeek Model",
+            options=list(DEEPSEEK_MODELS.keys()),
+            format_func=lambda m: DEEPSEEK_MODELS[m]["label"],
+            index=0,
+            key="ai_model",
         )
+
+    if not ai_ticker:
+        st.info("Select an existing ticker or enter a new ticker symbol above.")
     else:
-        a1, a2 = st.columns([1, 2])
-        with a1:
-            ai_ticker = st.selectbox("Select Ticker Dossier", available_tickers, key="ai_ticker")
-        with a2:
-            ai_model = st.selectbox(
-                "DeepSeek Model",
-                options=list(DEEPSEEK_MODELS.keys()),
-                format_func=lambda m: DEEPSEEK_MODELS[m]["label"],
-                index=0,
-                key="ai_model",
+        # ── One-Button Valuation Dataset Builder ─────────────────────────────
+        t_root_ai = DEFAULT_DATA_ROOT / ai_ticker
+        has_vpack = (t_root_ai / "ValuationPack.md").exists()
+        has_brief = (t_root_ai / "CompanyBrief.md").exists()
+        has_peers = (t_root_ai / "Peers.md").exists()
+        sec_md_count = len(list((t_root_ai / "DataFromDataMule_markdown").glob("*.md"))) if (t_root_ai / "DataFromDataMule_markdown").exists() else 0
+        tr_md_count = len(list((t_root_ai / "EarningsTranscripts").glob("*.md"))) if (t_root_ai / "EarningsTranscripts").exists() else 0
+
+        prep_c1, prep_c2, prep_c3 = st.columns([2, 1, 2])
+        with prep_c1:
+            prep_btn = st.button(
+                f"📦 Prepare Valuation Dataset for {ai_ticker}",
+                key=f"prep_ds_{ai_ticker}",
+                help="One-click: builds ValuationPack.md (price, live FX, 8Q+4Y statements, 10Y multiple band), CompanyBrief.md, Peers.md, latest SEC filings & latest 4 transcripts — skipping anything already on disk.",
             )
+        with prep_c2:
+            force_refresh_ds = st.checkbox("Force refresh", value=False, key=f"force_ds_{ai_ticker}")
+        with prep_c3:
+            st.caption(
+                f"On disk: ValuationPack {'✅' if has_vpack else '—'} | Brief {'✅' if has_brief else '—'} | "
+                f"Peers {'✅' if has_peers else '—'} | SEC: {sec_md_count} | Transcripts: {tr_md_count}"
+            )
+
+        if prep_btn:
+            prep_home_ccy = st.session_state.get("vp_home_ccy", "USD") or "USD"
+            with st.status(f"Preparing Valuation Dataset for {ai_ticker}...", expanded=True) as prep_st:
+                t_holder: List[object] = [None]
+
+                def _get_ticker_obj():
+                    if t_holder[0] is None:
+                        t_holder[0] = create_quiet_ticker(ai_ticker)
+                    return t_holder[0]
+
+                # 1. ValuationPack.md (Price, Spot FX, 8Q+4Y statements, 10Y multiple band)
+                if force_refresh_ds or not has_vpack:
+                    try:
+                        vp_res = generate_valuation_pack(
+                            ai_ticker,
+                            home_currency=prep_home_ccy,
+                            ticker_obj=_get_ticker_obj(),
+                            on_status=lambda m: prep_st.write(m),
+                        )
+                        prep_st.write(
+                            f"✅ Saved `ValuationPack.md` (Price: {vp_res.latest_price or 'n/a'}, "
+                            f"FX {vp_res.currency}->{vp_res.home_currency}: {vp_res.fx_rate or 'n/a'})"
+                        )
+                    except Exception as exc:
+                        prep_st.warning(f"ValuationPack error: {exc}")
+                else:
+                    prep_st.write("⏭️ `ValuationPack.md` already exists (skipped).")
+
+                # 2. CompanyBrief.md & Peers.md
+                if force_refresh_ds or not has_brief:
+                    try:
+                        generate_company_brief(ai_ticker, ticker_obj=_get_ticker_obj(), on_status=lambda m: prep_st.write(m))
+                        prep_st.write("✅ Saved `CompanyBrief.md`")
+                    except Exception as exc:
+                        prep_st.warning(f"CompanyBrief error: {exc}")
+                else:
+                    prep_st.write("⏭️ `CompanyBrief.md` already exists (skipped).")
+
+                if force_refresh_ds or not has_peers:
+                    try:
+                        generate_peers_report(ai_ticker, ticker_obj=_get_ticker_obj(), on_status=lambda m: prep_st.write(m))
+                        prep_st.write("✅ Saved `Peers.md`")
+                    except Exception as exc:
+                        prep_st.warning(f"Peers error: {exc}")
+                else:
+                    prep_st.write("⏭️ `Peers.md` already exists (skipped).")
+
+                # 3. Latest Annual + Quarterly SEC Filings (only if missing or force refresh)
+                if force_refresh_ds or sec_md_count == 0:
+                    try:
+                        sec_res = download_and_convert_sec_filings(
+                            ticker=ai_ticker,
+                            form_codes=["10-K", "20-F", "10-Q", "6-K", "8-K"],
+                            num_years=2,
+                            on_status=lambda m: prep_st.write(m),
+                        )
+                        prep_st.write(f"✅ SEC Filings: {len(sec_res.converted_files)} Markdown file(s) saved.")
+                    except Exception as exc:
+                        prep_st.warning(f"SEC download error: {exc}")
+                else:
+                    prep_st.write(f"⏭️ SEC filings already on disk ({sec_md_count} files — skipped).")
+
+                # 4. Latest 4 Earnings Transcripts (only if fewer than 4 on disk or force refresh)
+                if force_refresh_ds or tr_md_count < 4:
+                    try:
+                        tr_res = download_transcripts(
+                            ticker=ai_ticker,
+                            num_years=2,
+                            providers=enabled_providers,
+                            api_keys=api_keys,
+                            quota_manager=quota,
+                            on_log=lambda m: prep_st.write(m),
+                        )
+                        prep_st.write(
+                            f"✅ Transcripts: {len(tr_res.saved_files)} new, {len(tr_res.cached_quarters)} cached, "
+                            f"{len(tr_res.unavailable_upstream)} unavailable upstream."
+                        )
+                    except Exception as exc:
+                        prep_st.warning(f"Transcript download error: {exc}")
+                else:
+                    prep_st.write(f"⏭️ Transcripts already on disk ({tr_md_count} files — skipped).")
+
+                prep_st.update(label=f"Valuation Dataset ready for {ai_ticker}!", state="complete")
+            st.rerun()
 
         dossier_files = list_dossier_files(ai_ticker)
         if not dossier_files:
-            st.warning(f"No Markdown files found in `data/{ai_ticker}/` yet.")
+            st.info(
+                f"No Markdown files found in `data/{ai_ticker}/` yet. Click **📦 Prepare Valuation Dataset for {ai_ticker}** above to fetch everything in one click."
+            )
         else:
-            # Smart default selection: summaries + valuation + peers + up to 4 transcripts + 2 newest SEC filings
+            # Smart default selection: ValuationPack + Brief + Peers + up to 4 transcripts + 2 newest SEC filings
             default_selected = []
             tr_count = 0
             sec_count = 0
@@ -538,15 +654,15 @@ with tab_ai:
                 "Attach Local Files to DeepSeek Context (1M-token window)",
                 options=list(file_map.keys()),
                 default=default_selected,
-                help="Attaching CompanyBrief.md + Peers.md + recent SEC filings (10-K/20-F/10-Q) + 4 transcripts gives DeepSeek everything needed for your 5-Year Hurdle-Rate Valuation.",
+                help="Attaching ValuationPack.md + CompanyBrief.md + Peers.md + recent SEC filings (10-K/20-F/10-Q) + 4 transcripts gives DeepSeek everything needed for your 5-Year Hurdle-Rate Valuation.",
             )
             chosen_files = [file_map[lbl] for lbl in chosen_labels]
 
             # Live token & cost preview before calling DeepSeek
             total_bytes = sum(f.size_bytes for f in chosen_files)
             est_in_tokens = max(1, total_bytes // 4) if chosen_files else 0
-            est_cost_miss = estimate_cost_usd(ai_model, est_in_tokens, 4000, cache_hit_tokens=0)
-            est_cost_hit = estimate_cost_usd(ai_model, est_in_tokens, 4000, cache_hit_tokens=est_in_tokens)
+            est_cost_miss = estimate_cost_usd(ai_model, est_in_tokens, 6000, cache_hit_tokens=0)
+            est_cost_hit = estimate_cost_usd(ai_model, est_in_tokens, 6000, cache_hit_tokens=est_in_tokens)
             st.caption(
                 f"Attached: **{len(chosen_files)} file(s)** (~{est_in_tokens:,} input tokens) | "
                 f"Est. off-peak cost: **${est_cost_miss:.4f}** (1st run) / **${est_cost_hit:.4f}** (cached follow-up)"
@@ -570,12 +686,12 @@ with tab_ai:
                 with vp2:
                     spot_price_ov = st.text_input(
                         "Current Price Override (optional)",
-                        placeholder="e.g. USD 4.50 [Market Data: Yahoo, 2026-11-24]",
+                        placeholder="Auto-pulled in ValuationPack.md or override here",
                         key=f"vp_price_{ai_ticker}",
                     )
                     spot_fx_ov = st.text_input(
                         "Spot FX Rate Override (optional)",
-                        placeholder="e.g. 7.24 CNY/USD [Market Data: ECB, 2026-11-24]",
+                        placeholder="Auto-pulled in ValuationPack.md or override here",
                         key=f"vp_fx_{ai_ticker}",
                     )
                     adr_fee = st.text_input("Annual ADR/Custody Fee (Home CCY/sh)", value="0.00", key=f"vp_adr_{ai_ticker}")
@@ -649,22 +765,40 @@ with tab_ai:
                 elif not chosen_files:
                     st.warning("Select at least one dossier file above.")
                 else:
-                    try:
-                        with st.spinner(
-                            f"Running {ANALYSIS_WORKFLOWS[triggered_wf]['label']} on {ai_ticker} via {ai_model}..."
-                        ):
-                            res = run_workflow_analysis(
-                                ticker=ai_ticker,
-                                workflow_id=triggered_wf,
-                                files=chosen_files,
-                                api_key=deepseek_key,
-                                model=ai_model,
-                                valuation_params=val_params if triggered_wf == "scientific_valuation" else None,
-                                protocol_text=edited_protocol if triggered_wf == "scientific_valuation" else None,
-                                save_memo=save_memo_opt,
+                    progress_box = st.empty()
+
+                    def _on_ds_progress(phase: str, r_chars: int, c_chars: int) -> None:
+                        if phase == "thinking":
+                            progress_box.info(
+                                f"🧠 DeepSeek (`{ai_model}`) is reasoning through the protocol... "
+                                f"({r_chars:,} reasoning chars so far — please wait)"
                             )
+                        else:
+                            progress_box.info(
+                                f"✍️ DeepSeek (`{ai_model}`) is writing the final report... "
+                                f"({c_chars:,} output chars | {r_chars:,} reasoning chars)"
+                            )
+
+                    try:
+                        progress_box.info(
+                            f"⏳ Sending {len(chosen_files)} file(s) to DeepSeek (`{ai_model}`, max_tokens=65,536)..."
+                        )
+                        res = run_workflow_analysis(
+                            ticker=ai_ticker,
+                            workflow_id=triggered_wf,
+                            files=chosen_files,
+                            api_key=deepseek_key,
+                            model=ai_model,
+                            valuation_params=val_params if triggered_wf == "scientific_valuation" else None,
+                            protocol_text=edited_protocol if triggered_wf == "scientific_valuation" else None,
+                            stream=True,
+                            on_progress=_on_ds_progress,
+                            save_memo=save_memo_opt,
+                        )
+                        progress_box.empty()
                         st.session_state["last_ai_result"] = res
                     except Exception as exc:
+                        progress_box.empty()
                         st.error(f"DeepSeek analysis failed: {exc}")
 
             last_res = st.session_state.get("last_ai_result")
@@ -674,6 +808,8 @@ with tab_ai:
                     f"Tokens: {last_res.prompt_tokens:,} in ({last_res.cache_hit_tokens:,} cached) / "
                     f"{last_res.completion_tokens:,} out | Est. cost: **${last_res.estimated_cost_usd:.4f}**"
                 )
+                if last_res.finish_reason == "length":
+                    st.warning("Output hit the token cap (`finish_reason=length`). You can ask DeepSeek in the chat below to continue from where it stopped.")
                 if last_res.saved_path:
                     st.caption(f"Saved memo: `{last_res.saved_path}`")
                 act1, act2 = st.columns([1, 1])
@@ -696,6 +832,9 @@ with tab_ai:
                         ]
                         st.session_state[f"deepseek_chat_mode_{ai_ticker}"] = last_res.workflow_id
                         st.rerun()
+                if last_res.reasoning:
+                    with st.expander(f"🧠 View DeepSeek Internal Reasoning ({len(last_res.reasoning):,} chars)", expanded=False):
+                        st.markdown(last_res.reasoning)
                 st.markdown(last_res.content)
 
             st.divider()
@@ -737,14 +876,27 @@ with tab_ai:
                     ] + candidate_history
 
                     with st.chat_message("assistant"):
+                        chat_prog = st.empty()
+
+                        def _on_chat_progress(phase: str, r_chars: int, c_chars: int) -> None:
+                            if phase == "thinking":
+                                chat_prog.caption(f"🧠 Thinking... ({r_chars:,} chars)")
+                            else:
+                                chat_prog.caption(f"✍️ Writing... ({c_chars:,} chars)")
+
                         try:
-                            with st.spinner(f"DeepSeek ({ai_model}) analyzing {ai_ticker}..."):
-                                answer, usage = call_deepseek(
-                                    api_key=deepseek_key,
-                                    messages=messages,
-                                    model=ai_model,
-                                    max_tokens=8192 if chat_mode == "scientific_valuation" else 4096,
-                                )
+                            answer, chat_reasoning, _fin, usage = call_deepseek_full(
+                                api_key=deepseek_key,
+                                messages=messages,
+                                model=ai_model,
+                                max_tokens=65536 if chat_mode == "scientific_valuation" else 16384,
+                                stream=True,
+                                on_progress=_on_chat_progress,
+                            )
+                            chat_prog.empty()
+                            if chat_reasoning:
+                                with st.expander(f"🧠 View Reasoning ({len(chat_reasoning):,} chars)", expanded=False):
+                                    st.markdown(chat_reasoning)
                             st.markdown(answer)
                             c_usd = estimate_cost_usd(
                                 ai_model,
@@ -758,6 +910,7 @@ with tab_ai:
                             )
                             st.session_state[chat_key] = candidate_history + [{"role": "assistant", "content": answer}]
                         except Exception as exc:
+                            chat_prog.empty()
                             st.error(f"DeepSeek chat error: {exc}")
 
 
@@ -894,7 +1047,7 @@ with tab_browse:
             t_root = DEFAULT_DATA_ROOT / chosen_ticker
 
             md_files: List[Path] = []
-            for top_name in ("CompanyBrief.md", "Peers.md", "Coverage.md"):
+            for top_name in ("ValuationPack.md", "CompanyBrief.md", "Peers.md", "Coverage.md"):
                 tp = t_root / top_name
                 if tp.exists():
                     md_files.append(tp)

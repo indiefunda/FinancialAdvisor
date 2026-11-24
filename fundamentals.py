@@ -1006,3 +1006,306 @@ def build_portfolio_preflight(
         matrix_rows.append(row)
 
     return calendar_rows, matrix_rows
+
+
+# ============================================================================
+# 6. PROTOCOL-READY VALUATION PACK (`data/<TICKER>/ValuationPack.md`)
+# ============================================================================
+
+@dataclass
+class ValuationPackResult:
+    ticker: str
+    path: Path
+    currency: str = "USD"
+    home_currency: str = "USD"
+    latest_price: Optional[float] = None
+    latest_price_date: str = ""
+    fx_rate: Optional[float] = None
+    fx_date: str = ""
+    fx_source: str = ""
+
+
+def fetch_spot_fx_rate(
+    from_ccy: str,
+    to_ccy: str,
+    timeout: int = 10,
+    session: Optional[Any] = None,
+) -> Tuple[Optional[float], str, str]:
+    """Fetch latest spot FX rate (`1 from_ccy = X to_ccy`) from free ECB/Frankfurter API."""
+    src = (from_ccy or "USD").strip().upper()
+    dst = (to_ccy or "USD").strip().upper()
+    if src == dst:
+        return 1.0, date.today().isoformat(), "Identity (same currency)"
+
+    try:
+        import requests as _req
+
+        http = session or _req
+        resp = http.get(
+            f"https://api.frankfurter.app/latest?from={src}&to={dst}",
+            timeout=timeout,
+        )
+        if getattr(resp, "status_code", None) != 200:
+            return None, "", ""
+        payload = resp.json()
+        rates = payload.get("rates") if isinstance(payload, dict) else None
+        if isinstance(rates, dict) and dst in rates:
+            return float(rates[dst]), str(payload.get("date") or date.today().isoformat()), "ECB/Frankfurter"
+    except Exception:
+        pass
+    return None, "", ""
+
+
+def _extract_statement_df(obj: Any) -> Any:
+    """Unwrap a DefeatBeta Statement object (`.df()`) or return DataFrame as-is."""
+    if obj is None:
+        return None
+    df_fn = getattr(obj, "df", None)
+    if callable(df_fn):
+        try:
+            return df_fn()
+        except Exception:
+            return None
+    return obj
+
+
+def _format_statement_table(
+    raw_obj: Any,
+    wanted_rows: Sequence[str],
+    max_periods: int = 8,
+    currency: str = "USD",
+) -> List[str]:
+    """Render selected line items from a DefeatBeta financial statement into a clean Markdown table."""
+    df = _extract_statement_df(raw_obj)
+    if _df_is_empty(df):
+        return []
+
+    cols = list(df.columns)
+    if not cols:
+        return []
+
+    # DefeatBeta statements put line item names in the first column ("Breakdown") or index
+    label_col = cols[0] if str(cols[0]).lower() in ("breakdown", "item", "metric", "line_item") else None
+    period_cols = [c for c in cols if c != label_col][:max_periods]
+    if not period_cols:
+        return []
+
+    wanted_lower = [w.lower() for w in wanted_rows]
+    matched_rows: List[Tuple[str, List[str]]] = []
+    seen_labels: Set[str] = set()
+
+    for idx, row in df.iterrows():
+        raw_label = str(row[label_col] if label_col is not None else idx).strip()
+        if not raw_label:
+            continue
+        low = raw_label.lower()
+        if wanted_lower and not any(w in low for w in wanted_lower):
+            continue
+        if low in seen_labels:
+            continue
+        seen_labels.add(low)
+
+        vals: List[str] = []
+        has_any = False
+        for pc in period_cols:
+            v = row.get(pc)
+            if _is_nan(v) or str(v).strip() in ("", "*", "None", "nan"):
+                vals.append("n/a")
+            else:
+                try:
+                    fv = float(str(v).replace(",", ""))
+                    has_any = True
+                    if "share" in low or "eps" in low or "ratio" in low:
+                        vals.append(_fmt_money(fv) if abs(fv) >= 1_000 else _fmt_num(fv, 2))
+                    else:
+                        vals.append(_fmt_money(fv, currency))
+                except (TypeError, ValueError):
+                    vals.append(str(v).strip())
+                    has_any = True
+        if has_any:
+            matched_rows.append((raw_label.replace("|", "/"), vals))
+
+    if not matched_rows:
+        return []
+
+    header = "| Line Item | " + " | ".join(str(c) for c in period_cols) + " |"
+    sep = "| :--- | " + " | ".join("---:" for _ in period_cols) + " |"
+    lines = [header, sep]
+    for lbl, vals in matched_rows:
+        lines.append(f"| {lbl} | " + " | ".join(vals) + " |")
+    return lines
+
+
+def _compute_multiple_band(df: Any, preferred_cols: Sequence[str], min_year: int) -> Optional[Tuple[int, float, float, float, float, float]]:
+    """Compute (n_points, min, p25, median, p75, max) for a positive historical valuation multiple."""
+    if _df_is_empty(df):
+        return None
+    cols = list(df.columns)
+    val_col = next((c for c in preferred_cols if c in cols), None)
+    date_col = next((c for c in ("report_date", "date", "period_end_date") if c in cols), None)
+    if not val_col:
+        return None
+
+    vals: List[float] = []
+    for _, row in df.iterrows():
+        if date_col:
+            dt_s = str(row.get(date_col) or "")[:4]
+            if dt_s.isdigit() and int(dt_s) < min_year:
+                continue
+        raw = row.get(val_col)
+        if _is_nan(raw):
+            continue
+        try:
+            fv = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if fv > 0:
+            vals.append(fv)
+
+    if not vals:
+        return None
+    vals.sort()
+    n = len(vals)
+
+    def _pct(p: float) -> float:
+        idx = min(n - 1, max(0, int(round(p * (n - 1)))))
+        return vals[idx]
+
+    return (n, vals[0], _pct(0.25), _pct(0.50), _pct(0.75), vals[-1])
+
+
+def generate_valuation_pack(
+    ticker: str,
+    home_currency: str = "USD",
+    data_root: Path = DEFAULT_DATA_ROOT,
+    ticker_obj: Optional[Any] = None,
+    fx_session: Optional[Any] = None,
+    on_status: Optional[Callable[[str], None]] = None,
+) -> ValuationPackResult:
+    """Build `data/<TICKER>/ValuationPack.md` with structured tables tailored to the 5-Year Hurdle-Rate Protocol."""
+    clean = sanitize_ticker(ticker)
+    home_ccy = (home_currency or "USD").strip().upper()
+    t = ticker_obj if ticker_obj is not None else create_quiet_ticker(clean)
+
+    def _emit(msg: str) -> None:
+        if on_status:
+            on_status(msg)
+
+    _emit(f"Extracting latest price, FX & reporting currency for {clean}...")
+    currency = _detect_currency(t)
+    price_val, price_dt = _latest_value(_safe_call(t, "price"), ["close", "adj_close", "price"])
+    fx_rate, fx_dt, fx_src = fetch_spot_fx_rate(currency, home_ccy, session=fx_session)
+
+    mcap_val, mcap_dt = _latest_value(_safe_call(t, "market_capitalization"), ["market_capitalization", "market_cap"])
+    ev_val, _ = _latest_value(_safe_call(t, "enterprise_value"), ["enterprise_value", "ev"])
+    pe_df = _safe_call(t, "ttm_pe")
+    pb_df = _safe_call(t, "pb_ratio")
+    ps_df = _safe_call(t, "ps_ratio")
+    pe_val, _ = _latest_value(pe_df, ["ttm_pe", "pe"])
+    pb_val, _ = _latest_value(pb_df, ["pb_ratio", "pb"])
+    ps_val, _ = _latest_value(ps_df, ["ps_ratio", "ps"])
+
+    _emit(f"Extracting quarterly & annual financial statements for {clean}...")
+    q_inc = _safe_call(t, "quarterly_income_statement")
+    a_inc = _safe_call(t, "annual_income_statement")
+    q_bs = _safe_call(t, "quarterly_balance_sheet")
+    a_bs = _safe_call(t, "annual_balance_sheet")
+    q_cf = _safe_call(t, "quarterly_cash_flow")
+    a_cf = _safe_call(t, "annual_cash_flow")
+
+    inc_keywords = (
+        "total revenue", "gross profit", "operating income", "ebit", "net interest",
+        "interest income", "interest expense", "pretax income", "tax provision",
+        "net income", "normalized income", "diluted average shares", "basic average shares",
+        "reconciled depreciation", "ebitda",
+    )
+    bs_keywords = (
+        "cash and cash equivalents", "cash cash equivalents", "other short term investments",
+        "restricted cash", "investments and advances", "long term equity investment",
+        "total debt", "long term debt", "current debt", "lease",
+        "minority interest", "preferred stock", "stockholders equity",
+        "total equity gross minority interest", "ordinary shares number", "share issued",
+    )
+    cf_keywords = (
+        "operating cash flow", "capital expenditure", "free cash flow",
+        "depreciation", "stock based compensation", "repurchase of capital stock",
+        "common stock issuance", "cash dividends paid", "change in working capital",
+    )
+
+    lines = [
+        f"# {clean} — Valuation Protocol Dataset Pack (`ValuationPack.md`)",
+        "",
+        f"- **Generated:** {date.today().isoformat()}",
+        f"- **Reporting Currency:** `{currency}` | **Investor Home Currency:** `{home_ccy}`",
+        "- **Purpose:** Pre-extracted structured financial tables & historical valuation bands tailored for the 5-Year Hurdle-Rate Valuation Protocol. Cross-check footnotes (ADS ratio, VIE/offshore cash split, one-time items) against attached SEC filings (`10-K`/`20-F`/`10-Q`/`6-K`) and transcripts.",
+        "",
+        "## 1. Market Snapshot & Spot FX (`[Market Data]`)",
+        "",
+        "| Field | Value | Source Tag |",
+        "| :--- | ---: | :--- |",
+        f"| Latest Close Price (Listing CCY) | {_fmt_num(price_val, 2) if price_val is not None else 'not provided'} | `[Market Data: DefeatBeta, {price_dt or 'n/a'}]` |",
+        f"| Spot FX (`1 {currency} -> {home_ccy}`) | {f'{fx_rate:.6f}' if fx_rate is not None else 'not provided'} | `[Market Data: {fx_src or 'unavailable'}, {fx_dt or 'n/a'}]` |",
+        f"| Market Cap (USD) | {_fmt_money(mcap_val, 'USD')} | `[Market Data: DefeatBeta, {mcap_dt or 'n/a'}]` |",
+        f"| Enterprise Value (USD) | {_fmt_money(ev_val, 'USD')} | `[Market Data: DefeatBeta, {mcap_dt or 'n/a'}]` |",
+        f"| TTM P/E | {_fmt_num(pe_val, 2, 'x')} | `[Market Data: DefeatBeta, {mcap_dt or 'n/a'}]` |",
+        f"| Price / Book (P/B) | {_fmt_num(pb_val, 2, 'x')} | `[Market Data: DefeatBeta, {mcap_dt or 'n/a'}]` |",
+        f"| Price / Sales (P/S) | {_fmt_num(ps_val, 2, 'x')} | `[Market Data: DefeatBeta, {mcap_dt or 'n/a'}]` |",
+        "",
+    ]
+
+    # Section 2: Historical 5-10Y Multiple Band (Anchor 2)
+    min_yr = date.today().year - 10
+    band_rows = []
+    for lbl, bdf, bcols in (
+        ("TTM P/E", pe_df, ["ttm_pe", "pe"]),
+        ("Price / Book (P/B)", pb_df, ["pb_ratio", "pb"]),
+        ("Price / Sales (P/S)", ps_df, ["ps_ratio", "ps"]),
+    ):
+        band = _compute_multiple_band(bdf, bcols, min_year=min_yr)
+        if band:
+            n_pts, mn, p25, med, p75, mx = band
+            band_rows.append(
+                f"| {lbl} | {n_pts} | {mn:.2f}x | {p25:.2f}x | **{med:.2f}x** | {p75:.2f}x | {mx:.2f}x |"
+            )
+
+    if band_rows:
+        lines.extend([
+            "## 2. Historical Valuation Band — Anchor 2 (Up to 10 Years, Positive Observations)",
+            "",
+            "| Multiple | Obs. | Min | 25th Pct | Median | 75th Pct | Max |",
+            "| :--- | ---: | ---: | ---: | ---: | ---: | ---: |",
+            *band_rows,
+            "",
+        ])
+
+    # Sections 3-8: Structured Financial Statements
+    stmt_sections = [
+        ("3. Quarterly Income Statement (Seasonality & Clean Run-Rate)", q_inc, inc_keywords, 8),
+        ("4. Annual Income Statement (Multi-Year Trend)", a_inc, inc_keywords, 5),
+        ("5. Quarterly Balance Sheet (Cash, Debt, Leases, NCI & Parent Equity)", q_bs, bs_keywords, 4),
+        ("6. Annual Balance Sheet (Historical Invested Capital)", a_bs, bs_keywords, 4),
+        ("7. Annual Cash Flow Statement (Cash Conversion, CapEx, SBC & Executed Buybacks)", a_cf, cf_keywords, 5),
+        ("8. Quarterly Cash Flow Statement (Recent Cash Flow & Buyback Pace)", q_cf, cf_keywords, 4),
+    ]
+    for title, raw_stmt, kw, max_p in stmt_sections:
+        tbl = _format_statement_table(raw_stmt, kw, max_periods=max_p, currency=currency)
+        if tbl:
+            lines.extend([f"## {title} (`{currency}`)", "", *tbl, ""])
+
+    out_dir = data_root / clean
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "ValuationPack.md"
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+
+    return ValuationPackResult(
+        ticker=clean,
+        path=out_path,
+        currency=currency,
+        home_currency=home_ccy,
+        latest_price=price_val,
+        latest_price_date=price_dt,
+        fx_rate=fx_rate,
+        fx_date=fx_dt,
+        fx_source=fx_src,
+    )
+

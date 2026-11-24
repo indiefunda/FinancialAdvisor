@@ -13,6 +13,7 @@ from ai_analyst import (
     ValuationParameters,
     build_dossier_context,
     call_deepseek,
+    call_deepseek_full,
     estimate_cost_usd,
     list_dossier_files,
     load_valuation_protocol,
@@ -28,10 +29,12 @@ from config_manager import (
     save_api_keys,
 )
 from fundamentals import (
+    fetch_spot_fx_rate,
     generate_company_brief,
     generate_peers_report,
     generate_sec_coverage_audit,
     generate_valuation_bundle,
+    generate_valuation_pack,
 )
 from markdown_cleanup import cleanup_markdown_tables
 from sec_downloader import (
@@ -646,9 +649,11 @@ def test_call_deepseek_handles_non_json_and_missing_key():
 
 
 def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
-    # 1. Default valuation_protocol.md loads cleanly with all core guardrails
+    # 1. Default valuation_protocol.md (v2) loads cleanly with all core guardrails
     proto = load_valuation_protocol()
     assert "NO CAPM, NO BETA, NO WACC" in proto
+    assert "Share-Class & ADS Ratio Normalization" in proto
+    assert "RONIC" in proto
     assert "Phase 6: Mandatory Self-Audit" in proto
     assert "Quarter-Kelly" in proto
 
@@ -659,7 +664,7 @@ def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
     with pytest.raises(ValueError, match="empty"):
         save_valuation_protocol("   ", path=custom_path)
 
-    # 3. ValuationParameters + scientific_valuation workflow passes CAPM-free system prompt & max_tokens=8192
+    # 3. ValuationParameters + scientific_valuation workflow passes CAPM-free system prompt & max_tokens=65536
     t_dir = tmp_path / "HUIZ"
     t_dir.mkdir(parents=True)
     (t_dir / "CompanyBrief.md").write_text("# HUIZ Brief\nTTM Revenue (CNY): CNY 1.34B\n", encoding="utf-8")
@@ -677,7 +682,13 @@ def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
     mock_session = MagicMock()
     mock_resp = MagicMock(status_code=200)
     mock_resp.json.return_value = {
-        "choices": [{"message": {"content": "## Phase 1\nClean baseline...\n## Phase 6\nAll PASS."}}],
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {
+                "reasoning_content": "Checking ADS ratio and Sales-to-Capital...",
+                "content": "## Phase 1\nClean baseline...\n## Phase 6\nAll PASS.",
+            },
+        }],
         "usage": {"prompt_tokens": 2500, "completion_tokens": 1200, "prompt_cache_hit_tokens": 0},
     }
     mock_session.post.return_value = mock_resp
@@ -687,7 +698,7 @@ def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
         workflow_id="scientific_valuation",
         files=files,
         api_key="sk-test",
-        model="deepseek-v4-pro",
+        model="deepseek-flash",
         valuation_params=params,
         protocol_text=load_valuation_protocol(path=custom_path),
         save_memo=True,
@@ -695,8 +706,10 @@ def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
         session=mock_session,
     )
     assert res.saved_path is not None and res.saved_path.exists()
+    assert res.reasoning == "Checking ADS ratio and Sales-to-Capital..."
+    assert res.finish_reason == "stop"
     sent_payload = mock_session.post.call_args.kwargs["json"]
-    assert sent_payload["max_tokens"] == 8192
+    assert sent_payload["max_tokens"] == 65536
     assert "NEVER use CAPM, Beta, or WACC" in sent_payload["messages"][0]["content"]
     user_msg = sent_payload["messages"][1]["content"]
     assert "18.00% nominal annual IRR" in user_msg
@@ -704,4 +717,98 @@ def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
     assert "ACTIVE — include the full Cross-Border" in user_msg
     assert "Use GAAP SBC basis." in user_msg
     assert "My Updated Protocol" in user_msg
+
+
+def test_deepseek_never_returns_thoughts_as_final_answer_and_streams_cleanly():
+    # 1. Reasoning-only truncated response MUST raise, NEVER silently return thoughts as answer!
+    trunc_session = MagicMock()
+    trunc_resp = MagicMock(status_code=200)
+    trunc_resp.json.return_value = {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {"reasoning_content": "Long internal thinking...", "content": ""},
+        }],
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 8192},
+    }
+    trunc_session.post.return_value = trunc_resp
+    with pytest.raises(RuntimeError, match="exhausted the max_tokens limit"):
+        call_deepseek_full("sk-test", [{"role": "user", "content": "valuate"}], max_tokens=8192, session=trunc_session)
+
+    # 2. SSE streaming separates reasoning_content and content cleanly + parses usage
+    sse_lines = [
+        'data: {"choices":[{"delta":{"reasoning_content":"Step 1 think..."},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"content":"## Phase 1\\nFinal answer."},"finish_reason":"stop"}]}',
+        'data: {"choices":[],"usage":{"prompt_tokens":500,"completion_tokens":120,"prompt_cache_hit_tokens":400}}',
+        "data: [DONE]",
+    ]
+    stream_session = MagicMock()
+    stream_resp = MagicMock(status_code=200)
+    stream_resp.iter_lines.return_value = iter(sse_lines)
+    stream_session.post.return_value = stream_resp
+
+    content, reasoning, finish, usage = call_deepseek_full(
+        "sk-test",
+        [{"role": "user", "content": "valuate"}],
+        max_tokens=65536,
+        stream=True,
+        session=stream_session,
+    )
+    assert content == "## Phase 1\nFinal answer."
+    assert reasoning == "Step 1 think..."
+    assert finish == "stop"
+    assert usage == {"prompt_tokens": 500, "completion_tokens": 120, "cache_hit_tokens": 400}
+
+
+def test_generate_valuation_pack_and_spot_fx(tmp_path: Path):
+    mock_t = _make_mock_ticker(sector="Technology", currency="CNY", base_fcf=50_000_000.0)
+    mock_t.price.return_value = _FakeDF([{"report_date": "2026-11-23", "close": 4.85}])
+
+    class _FakeStatement:
+        def __init__(self, df):
+            self._df = df
+
+        def df(self):
+            return self._df
+
+    mock_t.quarterly_income_statement.return_value = _FakeStatement(_FakeDF([
+        {"Breakdown": "Total Revenue", "2026-09-30": 350_000_000, "2026-06-30": 320_000_000},
+        {"Breakdown": "Operating Income", "2026-09-30": 42_000_000, "2026-06-30": 38_000_000},
+    ]))
+    mock_t.annual_income_statement.return_value = _FakeStatement(_FakeDF([
+        {"Breakdown": "Total Revenue", "2025-12-31": 1_200_000_000, "2024-12-31": 1_050_000_000},
+    ]))
+    mock_t.quarterly_balance_sheet.return_value = _FakeStatement(_FakeDF([
+        {"Breakdown": "Cash And Cash Equivalents", "2026-09-30": 400_000_000},
+        {"Breakdown": "Stockholders Equity", "2026-09-30": 750_000_000},
+    ]))
+    mock_t.annual_balance_sheet.return_value = _FakeStatement(_FakeDF([]))
+    mock_t.annual_cash_flow.return_value = _FakeStatement(_FakeDF([
+        {"Breakdown": "Operating Cash Flow", "2025-12-31": 120_000_000},
+        {"Breakdown": "Repurchase Of Capital Stock", "2025-12-31": -15_000_000},
+    ]))
+    mock_t.quarterly_cash_flow.return_value = _FakeStatement(_FakeDF([]))
+
+    fx_session = MagicMock()
+    fx_resp = MagicMock(status_code=200)
+    fx_resp.json.return_value = {"date": "2026-11-23", "rates": {"USD": 0.1385}}
+    fx_session.get.return_value = fx_resp
+
+    # Identity FX check
+    id_rate, _, _ = fetch_spot_fx_rate("USD", "USD")
+    assert id_rate == 1.0
+
+    vp = generate_valuation_pack("HUIZ", home_currency="USD", data_root=tmp_path, ticker_obj=mock_t, fx_session=fx_session)
+    assert vp.latest_price == 4.85
+    assert vp.fx_rate == 0.1385
+    vp_text = vp.path.read_text(encoding="utf-8")
+    assert "`[Market Data: DefeatBeta, 2026-11-23]`" in vp_text
+    assert "`[Market Data: ECB/Frankfurter, 2026-11-23]`" in vp_text
+    assert "Total Revenue | CNY 350.00M | CNY 320.00M" in vp_text
+    assert "Cash And Cash Equivalents | CNY 400.00M" in vp_text
+    assert "Repurchase Of Capital Stock | CNY -15.00M" in vp_text
+
+    # ValuationPack.md must be Priority #1 in list_dossier_files
+    dossier = list_dossier_files("HUIZ", data_root=tmp_path)
+    assert dossier[0].rel_label == "ValuationPack.md"
+
 

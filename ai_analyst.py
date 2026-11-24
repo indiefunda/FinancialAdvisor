@@ -9,11 +9,12 @@ workflows directly over each ticker's local dossier (`CompanyBrief.md`,
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import requests
 
@@ -159,7 +160,7 @@ ANALYSIS_WORKFLOWS: Dict[str, Dict[str, Any]] = {
     "scientific_valuation": {
         "label": "🧮 5-Year Hurdle-Rate Valuation (Custom Protocol)",
         "short_desc": "Run your editable CAPM/WACC-free 6-phase IRR & Quarter-Kelly protocol over SEC filings & transcripts.",
-        "max_tokens": 8192,
+        "max_tokens": 65536,
         "system_prompt": SYSTEM_PROMPT_VALUATION,
         "prompt": "",  # Built dynamically from valuation_protocol.md + ValuationParameters
     },
@@ -233,6 +234,8 @@ class AnalysisResult:
     model: str
     workflow_id: str
     content: str
+    reasoning: str = ""
+    finish_reason: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cache_hit_tokens: int = 0
@@ -279,8 +282,9 @@ def list_dossier_files(ticker: str, data_root: Path = DEFAULT_DATA_ROOT) -> List
 
     found: List[DossierFile] = []
 
-    # Priority 1: Structured summaries & valuation
+    # Priority 1: Structured valuation pack, summaries & peers
     priority_specs = [
+        ("ValuationPack.md", "Summary"),
         ("CompanyBrief.md", "Summary"),
         ("Valuation/DCF_Summary.md", "Valuation"),
         ("Peers.md", "Peers"),
@@ -380,16 +384,22 @@ def save_analysis_memo(
     return out_path
 
 
-def call_deepseek(
+def call_deepseek_full(
     api_key: str,
     messages: List[Dict[str, str]],
     model: str = DEFAULT_MODEL,
     temperature: float = 0.2,
     max_tokens: int = 4096,
-    timeout: int = 180,
+    timeout: Any = (30, 600),
+    stream: bool = False,
+    on_progress: Optional[Callable[[str, int, int], None]] = None,
     session: Optional[requests.Session] = None,
-) -> Tuple[str, Dict[str, int]]:
-    """Call DeepSeek's OpenAI-compatible chat completions endpoint safely."""
+) -> Tuple[str, str, str, Dict[str, int]]:
+    """Call DeepSeek's OpenAI-compatible chat completions endpoint.
+
+    Returns `(content, reasoning, finish_reason, usage)` and NEVER silently
+    substitutes raw internal `reasoning_content` for the final answer.
+    """
     if not api_key or not api_key.strip():
         raise ValueError("DeepSeek API key is not configured. Add it in the sidebar or Secrets.txt.")
 
@@ -403,40 +413,111 @@ def call_deepseek(
         "messages": messages,
         "max_tokens": max_tokens,
     }
-    # Reasoning/pro models may ignore or disallow custom temperature; pass safely for flash
     if model == "deepseek-flash":
         payload["temperature"] = temperature
+    if stream:
+        payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
 
-    resp = http.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=timeout)
-
-    try:
-        body = resp.json()
-    except (ValueError, TypeError) as exc:
-        raise RuntimeError(
-            f"DeepSeek API returned non-JSON response (HTTP {resp.status_code})."
-        ) from exc
+    resp = http.post(
+        DEEPSEEK_API_URL,
+        headers=headers,
+        json=payload,
+        timeout=timeout,
+        stream=stream,
+    )
 
     if resp.status_code != 200:
         err_msg = ""
-        if isinstance(body, dict):
-            err = body.get("error")
-            if isinstance(err, dict):
-                err_msg = str(err.get("message") or err)
-            elif err:
-                err_msg = str(err)
+        try:
+            body = resp.json()
+            if isinstance(body, dict):
+                err = body.get("error")
+                if isinstance(err, dict):
+                    err_msg = str(err.get("message") or err)
+                elif err:
+                    err_msg = str(err)
+        except (ValueError, TypeError):
+            raise RuntimeError(
+                f"DeepSeek API returned non-JSON response (HTTP {resp.status_code})."
+            )
         raise RuntimeError(f"DeepSeek API error (HTTP {resp.status_code}): {err_msg or 'Unknown error'}")
 
-    choices = body.get("choices") if isinstance(body, dict) else None
-    if not isinstance(choices, list) or not choices:
-        raise RuntimeError("DeepSeek API returned an empty response with no choices.")
+    content_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    finish_reason = ""
+    usage_raw: Dict[str, Any] = {}
 
-    msg = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
-    content = str(msg.get("content") or "").strip()
-    reasoning = str(msg.get("reasoning_content") or "").strip()
-    if not content and reasoning:
-        content = reasoning
+    if stream:
+        r_chars = 0
+        c_chars = 0
+        last_report = 0
+        for raw_line in resp.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            if data_str == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data_str)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            if isinstance(chunk.get("usage"), dict):
+                usage_raw = chunk["usage"]
+            choices = chunk.get("choices")
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                c0 = choices[0]
+                if c0.get("finish_reason"):
+                    finish_reason = str(c0["finish_reason"])
+                delta = c0.get("delta") or {}
+                if isinstance(delta, dict):
+                    rc = delta.get("reasoning_content")
+                    if rc:
+                        reasoning_parts.append(str(rc))
+                        r_chars += len(str(rc))
+                    cc = delta.get("content")
+                    if cc:
+                        content_parts.append(str(cc))
+                        c_chars += len(str(cc))
+                    if on_progress and (r_chars + c_chars - last_report) >= 250:
+                        last_report = r_chars + c_chars
+                        phase = "writing" if c_chars > 0 else "thinking"
+                        on_progress(phase, r_chars, c_chars)
+        content = "".join(content_parts).strip()
+        reasoning = "".join(reasoning_parts).strip()
+    else:
+        try:
+            body = resp.json()
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError(
+                f"DeepSeek API returned non-JSON response (HTTP {resp.status_code})."
+            ) from exc
 
-    usage_raw = body.get("usage", {}) if isinstance(body, dict) else {}
+        choices = body.get("choices") if isinstance(body, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError("DeepSeek API returned an empty response with no choices.")
+
+        c0 = choices[0] if isinstance(choices[0], dict) else {}
+        finish_reason = str(c0.get("finish_reason") or "")
+        msg = c0.get("message", {}) if isinstance(c0.get("message"), dict) else {}
+        content = str(msg.get("content") or "").strip()
+        reasoning = str(msg.get("reasoning_content") or "").strip()
+        usage_raw = body.get("usage", {}) if isinstance(body, dict) else {}
+
+    if not content:
+        if finish_reason == "length" and reasoning:
+            raise RuntimeError(
+                f"DeepSeek exhausted the max_tokens limit ({max_tokens:,}) during internal reasoning "
+                f"({len(reasoning):,} chars of thoughts) before writing the final valuation. "
+                "Try attaching fewer raw SEC filings (rely on ValuationPack.md + CompanyBrief.md) or re-running."
+            )
+        raise RuntimeError("DeepSeek API returned an empty final answer.")
+
     prompt_details = usage_raw.get("prompt_tokens_details") or {}
     cache_hit = int(
         usage_raw.get("prompt_cache_hit_tokens")
@@ -448,6 +529,29 @@ def call_deepseek(
         "completion_tokens": int(usage_raw.get("completion_tokens") or 0),
         "cache_hit_tokens": cache_hit,
     }
+    return content, reasoning, finish_reason, usage
+
+
+def call_deepseek(
+    api_key: str,
+    messages: List[Dict[str, str]],
+    model: str = DEFAULT_MODEL,
+    temperature: float = 0.2,
+    max_tokens: int = 4096,
+    timeout: Any = (30, 600),
+    session: Optional[requests.Session] = None,
+) -> Tuple[str, Dict[str, int]]:
+    """Backwards-compatible wrapper returning `(content, usage)`."""
+    content, _reasoning, _finish, usage = call_deepseek_full(
+        api_key=api_key,
+        messages=messages,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        stream=False,
+        session=session,
+    )
     return content, usage
 
 
@@ -461,6 +565,8 @@ def run_workflow_analysis(
     valuation_params: Optional[ValuationParameters] = None,
     protocol_text: Optional[str] = None,
     max_tokens: Optional[int] = None,
+    stream: bool = False,
+    on_progress: Optional[Callable[[str, int, int], None]] = None,
     save_memo: bool = True,
     data_root: Path = DEFAULT_DATA_ROOT,
     session: Optional[requests.Session] = None,
@@ -494,11 +600,13 @@ def run_workflow_analysis(
         {"role": "user", "content": user_task},
     ]
 
-    content, usage = call_deepseek(
+    content, reasoning, finish_reason, usage = call_deepseek_full(
         api_key=api_key,
         messages=messages,
         model=model,
         max_tokens=effective_max_tokens,
+        stream=stream,
+        on_progress=on_progress,
         session=session,
     )
 
@@ -525,6 +633,8 @@ def run_workflow_analysis(
         model=model,
         workflow_id=workflow_id,
         content=content,
+        reasoning=reasoning,
+        finish_reason=finish_reason,
         prompt_tokens=usage["prompt_tokens"],
         completion_tokens=usage["completion_tokens"],
         cache_hit_tokens=usage["cache_hit_tokens"],
