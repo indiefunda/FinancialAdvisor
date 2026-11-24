@@ -10,16 +10,18 @@ workflows directly over each ticker's local dossier (`CompanyBrief.md`,
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import requests
 
+from config_manager import PROVIDER_SPECS
 from sec_downloader import DEFAULT_DATA_ROOT, sanitize_ticker
 
-DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_API_URL = f"{PROVIDER_SPECS['deepseek']['base_url'].rstrip('/')}/chat/completions"
+_TRANSCRIPT_PERIOD_RE = re.compile(r"Q([1-4])\s+(\d{4})", re.IGNORECASE)
 
 # Off-peak rates per 1M tokens (USD) as of late 2026; peak hours are 2x.
 DEEPSEEK_MODELS: Dict[str, Dict[str, Any]] = {
@@ -150,6 +152,14 @@ def estimate_cost_usd(
     return round(cost, 6)
 
 
+def _transcript_sort_key(path: Path) -> Tuple[int, int, str]:
+    """Sort transcripts chronologically by (year, quarter), newest first when reversed."""
+    m = _TRANSCRIPT_PERIOD_RE.search(path.name)
+    if m:
+        return (int(m.group(2)), int(m.group(1)), path.name)
+    return (0, 0, path.name)
+
+
 def list_dossier_files(ticker: str, data_root: Path = DEFAULT_DATA_ROOT) -> List[DossierFile]:
     """Discover all local Markdown files for a ticker, ordered by analytical value."""
     clean = sanitize_ticker(ticker)
@@ -171,10 +181,10 @@ def list_dossier_files(ticker: str, data_root: Path = DEFAULT_DATA_ROOT) -> List
         if p.exists() and p.is_file():
             found.append(DossierFile(rel, p, cat, p.stat().st_size))
 
-    # Priority 2: Earnings transcripts (newest first)
+    # Priority 2: Earnings transcripts (newest fiscal period first!)
     tr_dir = t_root / "EarningsTranscripts"
     if tr_dir.exists():
-        for p in sorted(tr_dir.glob("*.md"), reverse=True):
+        for p in sorted(tr_dir.glob("*.md"), key=_transcript_sort_key, reverse=True):
             found.append(DossierFile(f"EarningsTranscripts/{p.name}", p, "Transcript", p.stat().st_size))
 
     # Priority 3: SEC filings (newest first)
@@ -231,14 +241,18 @@ def save_analysis_memo(
     source_files: Sequence[str],
     data_root: Path = DEFAULT_DATA_ROOT,
 ) -> Path:
-    """Persist a DeepSeek analysis memo under `data/<TICKER>/Analysis/`."""
+    """Persist a DeepSeek analysis memo under `data/<TICKER>/Analysis/` without overwriting same-day runs."""
     clean = sanitize_ticker(ticker)
     out_dir = data_root / clean / "Analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     safe_wf = re.sub(r"[^a-zA-Z0-9_-]", "_", workflow_id)
-    fname = f"{date.today().isoformat()}_{safe_wf}.md"
-    out_path = out_dir / fname
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    out_path = out_dir / f"{stamp}_{safe_wf}.md"
+    idx = 2
+    while out_path.exists():
+        out_path = out_dir / f"{stamp}_{safe_wf}_{idx}.md"
+        idx += 1
 
     header = [
         f"# {clean} — DeepSeek AI Analysis (`{workflow_id}`)",

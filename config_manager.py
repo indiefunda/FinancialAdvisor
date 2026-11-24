@@ -23,7 +23,6 @@ QUOTA_FILE = REPO_ROOT / ".quota_state.json"
 PROVIDER_SPECS: Dict[str, Dict[str, Any]] = {
     "defeatbeta": {
         "label": "DefeatBeta (Hugging Face)",
-        "category": "data",
         "requires_key": False,
         "env_var": None,
         "limit_desc": "Unlimited (open dataset, no API key)",
@@ -31,7 +30,6 @@ PROVIDER_SPECS: Dict[str, Dict[str, Any]] = {
     },
     "roic": {
         "label": "ROIC.ai API v3",
-        "category": "data",
         "requires_key": True,
         "env_var": "ROIC_API_KEY",
         "limit_desc": "Free: 5 req/min, latest 2 calls/company",
@@ -41,7 +39,6 @@ PROVIDER_SPECS: Dict[str, Dict[str, Any]] = {
     },
     "alphavantage": {
         "label": "Alpha Vantage",
-        "category": "data",
         "requires_key": True,
         "env_var": "ALPHAVANTAGE_API_KEY",
         "limit_desc": "Free: 25 req/day (~1 req/sec), full history since 2010Q1",
@@ -51,7 +48,6 @@ PROVIDER_SPECS: Dict[str, Dict[str, Any]] = {
     },
     "firecrawl": {
         "label": "Firecrawl (Web + Alexandria)",
-        "category": "data",
         "requires_key": True,
         "env_var": "FIRECRAWL_API_KEY",
         "limit_desc": "Free: 1,000 credits/month (fallback only)",
@@ -60,7 +56,6 @@ PROVIDER_SPECS: Dict[str, Dict[str, Any]] = {
     },
     "deepseek": {
         "label": "DeepSeek AI",
-        "category": "llm",
         "requires_key": True,
         "env_var": "DEEPSEEK_API_KEY",
         "base_url": "https://api.deepseek.com",

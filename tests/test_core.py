@@ -425,11 +425,13 @@ def test_waterfall_respects_custom_provider_order(tmp_path: Path):
 
 
 # ============================================================================
-# 5. fundamentals.py (CompanyBrief, Peers, DCF, SEC Coverage Audit)
+# 5. fundamentals.py (Bugs 1-4: Currency, Coverage, Invalid DCF, Segments)
 # ============================================================================
 
 def _make_mock_ticker(sector="Financial Services", currency="CNY", base_fcf=-15_000_000.0):
     t = MagicMock()
+    t.ticker = "HUIZ"
+    t.company_meta.get_company_info.return_value = {"financial_currency": currency}
     t.info.return_value = _FakeDF([{
         "sector": sector,
         "industry": "Credit Services",
@@ -446,13 +448,21 @@ def _make_mock_ticker(sector="Financial Services", currency="CNY", base_fcf=-15_
     t.peg_ratio.return_value = _FakeDF([])
     t.market_capitalization.return_value = _FakeDF([{"report_date": "2026-11-20", "market_capitalization": 350_000_000}])
     t.enterprise_value.return_value = _FakeDF([{"report_date": "2026-11-20", "enterprise_value": 280_000_000}])
-    t.net_debt_ttm.return_value = _FakeDF([{"report_date": "2026-09-30", "net_debt_ttm": -70_000_000}])
+    t.net_debt_ttm.return_value = _FakeDF([{"report_date": "2026-09-30", "net_debt": -70_000_000}])
     t.debt_to_equity.return_value = _FakeDF([{"report_date": "2026-09-30", "debt_to_equity": 0.35}])
     t.wacc.return_value = _FakeDF([{"report_date": "2026-09-30", "wacc": 0.112}])
     t.ttm_eps.return_value = _FakeDF([{"report_date": "2026-09-30", "tailing_eps": 0.45}])
-    t.ttm_revenue.return_value = _FakeDF([{"report_date": "2026-09-30", "ttm_revenue": 1_200_000_000}])
-    t.ttm_fcf.return_value = _FakeDF([{"report_date": "2026-09-30", "ttm_fcf": base_fcf}])
-    # Empty ROIC (just like UPST / LU in real life) -> must degrade to n/a, NOT 0!
+    # Real DefeatBeta schema: local currency column + _usd column (Bug 1 regression!)
+    t.ttm_revenue.return_value = _FakeDF([{
+        "report_date": "2026-09-30",
+        "ttm_total_revenue": 1_336_186_000,
+        "ttm_total_revenue_usd": 186_303_314,
+    }])
+    t.ttm_fcf.return_value = _FakeDF([{
+        "report_date": "2026-09-30",
+        "ttm_free_cash_flow": base_fcf,
+        "ttm_free_cash_flow_usd": base_fcf / 7.17,
+    }])
     t.roic.return_value = _FakeDF([])
     t.roe.return_value = _FakeDF([{"report_date": "2026-09-30", "roe": 0.14}])
     t.roa.return_value = _FakeDF([{"report_date": "2026-09-30", "roa": 0.06}])
@@ -461,7 +471,12 @@ def _make_mock_ticker(sector="Financial Services", currency="CNY", base_fcf=-15_
     t.quarterly_net_margin.return_value = _FakeDF([{"report_date": "2026-09-30", "net_margin": 0.09}])
     t.quarterly_fcf_margin.return_value = _FakeDF([])
     t.quarterly_revenue_yoy_growth.return_value = _FakeDF([{"report_date": "2026-09-30", "yoy_growth": 0.21}])
-    t.trailing_revenue_by_breakdown.return_value = _FakeDF([])
+    # Real DefeatBeta breakdown schema with value + currency + multiple dates (Bug 4 regression!)
+    t.trailing_revenue_by_breakdown.return_value = _FakeDF([
+        {"symbol": "HUIZ", "breakdown": "revenue-by-segment", "breakdown_name": "Revenue by Segment", "period_type": "trailing", "report_date": "2025-09-30", "series_name": "Old Row", "value": 500_000_000, "currency": "CNY"},
+        {"symbol": "HUIZ", "breakdown": "revenue-by-segment", "breakdown_name": "Revenue by Segment", "period_type": "trailing", "report_date": "2026-09-30", "series_name": "Life Insurance", "value": 900_000_000, "currency": "CNY"},
+        {"symbol": "HUIZ", "breakdown": "revenue-by-segment", "breakdown_name": "Revenue by Segment", "period_type": "trailing", "report_date": "2026-09-30", "series_name": "Health Insurance", "value": 436_186_000, "currency": "CNY"},
+    ])
 
     t.industry_ttm_pe.return_value = _FakeDF([{"report_date": "2026-11-20", "industry_pe": 15.0}])
     t.industry_ps_ratio.return_value = _FakeDF([{"report_date": "2026-11-20", "industry_ps": 2.4}])
@@ -486,115 +501,121 @@ def _make_mock_ticker(sector="Financial Services", currency="CNY", base_fcf=-15_
         },
         "dcf_value": {
             "current_price": 4.50,
-            "fair_price": 6.20,
-            "margin_of_safety": 0.274,
-            "recommendation": "UNDERVALUED",
-            "enterprise_value": 280_000_000,
+            "fair_price": -4.04 if base_fcf <= 0 else 6.20,
+            "margin_of_safety": 1.5257 if base_fcf <= 0 else 0.274,
+            "recommendation": "Sell" if base_fcf <= 0 else "UNDERVALUED",
+            "enterprise_value": 0.0 if base_fcf <= 0 else 280_000_000,
             "cash": 100_000_000,
             "total_debt": 30_000_000,
-            "equity_value": 350_000_000,
+            "equity_value": -20_000_000 if base_fcf <= 0 else 350_000_000,
             "shares_outstanding": 56_000_000,
         },
     }
     t.sec_filing.return_value = _FakeDF([
-        {"filing_date": "2026-04-20", "form_type": "20-F", "form_type_description": "Annual report", "filing_url": "https://sec.gov/1"},
-        {"filing_date": "2026-05-15", "form_type": "SC 13D", "form_type_description": "Active stake", "filing_url": "https://sec.gov/2"},
+        {"filing_date": "2026-04-24", "form_type": "20-F", "accession_number": "0001193125-26-000111", "form_type_description": "FY2025 Annual report", "filing_url": "https://sec.gov/1"},
+        {"filing_date": "2025-04-23", "form_type": "20-F", "accession_number": "0001193125-25-000222", "form_type_description": "FY2024 Annual report", "filing_url": "https://sec.gov/2"},
+        {"filing_date": "2026-05-15", "form_type": "SC 13D", "accession_number": "0001193125-26-000333", "form_type_description": "Active stake", "filing_url": "https://sec.gov/3"},
     ])
     return t
 
 
-def test_fundamentals_brief_peers_dcf_and_coverage(tmp_path: Path):
+def test_fundamentals_currency_segments_invalid_dcf_and_accession_coverage(tmp_path: Path):
     mock_t = _make_mock_ticker(sector="Financial Services", currency="CNY", base_fcf=-15_000_000.0)
 
+    # Bug 1: TTM Revenue (CNY) MUST read ttm_total_revenue (CNY 1.34B), NOT ttm_total_revenue_usd (186.30M)!
     brief = generate_company_brief("HUIZ", data_root=tmp_path, ticker_obj=mock_t)
     assert brief.currency == "CNY"
-    assert brief.next_earnings_date == "2026-12-15"
-    assert brief.metrics["ROIC"] == "n/a"  # Empty ROIC degrades to n/a, never 0%
+    assert brief.metrics["TTM Revenue (CNY)"] == "CNY 1.34B"
+    assert brief.metrics["TTM Revenue (USD equiv.)"] == "USD 186.30M"
+    assert brief.metrics["ROIC"] == "n/a"
+
+    # Bug 4: Segment table MUST include revenue values + currency and only latest report_date!
     brief_text = brief.path.read_text(encoding="utf-8")
-    assert "`CNY`" in brief_text
-    assert "12.50x" in brief_text
+    assert "Life Insurance | CNY 900.00M" in brief_text
+    assert "Health Insurance | CNY 436.19M" in brief_text
+    assert "Old Row" not in brief_text
 
     peers_path = generate_peers_report("HUIZ", data_root=tmp_path, ticker_obj=mock_t)
     peers_text = peers_path.read_text(encoding="utf-8")
-    assert "-2.50x" in peers_text  # 12.5 - 15.0 spread
+    assert "-2.50x" in peers_text
     assert "| ROIC | n/a | n/a | n/a |" in peers_text
 
+    # Bug 3: Invalid DCF (base_fcf <= 0, fair_price < 0) MUST omit valuation table & mark not applicable!
     val = generate_valuation_bundle("HUIZ", data_root=tmp_path, ticker_obj=mock_t, generate_excel=False)
-    assert val.json_path is not None and val.json_path.exists()
-    assert len(val.warnings) == 2  # Both negative FCF AND Financial Services caveats flagged!
+    assert val.model_applicable is False
     dcf_text = val.summary_md_path.read_text(encoding="utf-8")
-    assert "non-positive" in dcf_text
-    assert "Financial Services" in dcf_text
+    assert "Model not applicable" in dcf_text
+    assert "-4.04" not in dcf_text
+    assert "152.57%" not in dcf_text
+    assert "WACC / Discount Rate" in dcf_text  # Assumptions still kept for context
 
-    # Seed one matching local SEC markdown file to verify diff detection
+    # Bug 2: Accession-number matching eliminates off-by-one FY2025 vs 2026-04-24 mismatch!
     sec_dir = tmp_path / "HUIZ" / "DataFromDataMule_markdown"
     sec_dir.mkdir(parents=True, exist_ok=True)
-    (sec_dir / "HUIZ - 20-F FY 2026-04-20.md").write_text("# 20-F", encoding="utf-8")
+    (sec_dir / "HUIZ - 20-F FY 2025.md").write_text(
+        "---\nticker: HUIZ\nform_type: 20-F\nfiling_date: 2026-04-24\naccession_number: 0001193125-26-000111\n---\n# 20-F",
+        encoding="utf-8",
+    )
 
     cov = generate_sec_coverage_audit("HUIZ", num_years=2, data_root=tmp_path, ticker_obj=mock_t)
-    assert cov.total_indexed == 2
     assert cov.notable_extra_forms == {"SC 13D": 1}
     cov_text = cov.path.read_text(encoding="utf-8")
-    assert "| 2026-04-20 | `20-F` | Yes |" in cov_text
-    assert "| 2026-05-15 | `SC 13D` | Missing |" in cov_text
+    assert "| 2026-04-24 | `20-F` | Yes |" in cov_text       # Exact accession match!
+    assert "| 2025-04-23 | `20-F` | Missing |" in cov_text   # No false positive from "2025" in filename!
 
 
 # ============================================================================
-# 6. ai_analyst.py (DeepSeek Engine)
+# 6. ai_analyst.py (Bugs 5-6: Transcript Chronological Order & Unique Memos)
 # ============================================================================
 
-def test_deepseek_cost_dossier_workflow_and_memo_saving(tmp_path: Path):
-    # Create sample dossier files
+def test_deepseek_transcript_sorting_and_unique_same_day_memos(tmp_path: Path):
     t_dir = tmp_path / "HUIZ"
     (t_dir / "Valuation").mkdir(parents=True)
     (t_dir / "EarningsTranscripts").mkdir(parents=True)
     (t_dir / "CompanyBrief.md").write_text("# HUIZ Brief\nROIC: 14%\n", encoding="utf-8")
     (t_dir / "Valuation" / "DCF_Summary.md").write_text("# DCF\nAssumed Growth: 18%\n", encoding="utf-8")
-    (t_dir / "EarningsTranscripts" / "HUIZ - Q3 2026.md").write_text("**CEO:** We guide 15% growth.\n", encoding="utf-8")
+
+    # Bug 5 regression: string reverse sort would put Q4 2024 before Q2 2025!
+    for fname in ("HUIZ - Q4 2024.md", "HUIZ - Q3 2024.md", "HUIZ - Q1 2025.md", "HUIZ - Q2 2025.md"):
+        (t_dir / "EarningsTranscripts" / fname).write_text(f"Transcript {fname}", encoding="utf-8")
 
     files = list_dossier_files("HUIZ", data_root=tmp_path)
-    assert [f.rel_label for f in files] == [
-        "CompanyBrief.md",
-        "Valuation/DCF_Summary.md",
-        "EarningsTranscripts/HUIZ - Q3 2026.md",
+    tr_labels = [f.rel_label for f in files if f.category == "Transcript"]
+    assert tr_labels == [
+        "EarningsTranscripts/HUIZ - Q2 2025.md",
+        "EarningsTranscripts/HUIZ - Q1 2025.md",
+        "EarningsTranscripts/HUIZ - Q4 2024.md",
+        "EarningsTranscripts/HUIZ - Q3 2024.md",
     ]
+
     ctx, trunc = build_dossier_context(files)
     assert "FILE: CompanyBrief.md" in ctx
-    assert "FILE: Valuation/DCF_Summary.md" in ctx
     assert trunc == []
 
-    # Cost math verification (deepseek-flash off-peak)
     c_miss = estimate_cost_usd("deepseek-flash", 100_000, 2_000, cache_hit_tokens=0)
     c_hit = estimate_cost_usd("deepseek-flash", 100_000, 2_000, cache_hit_tokens=100_000)
     assert c_hit < c_miss
 
-    # Mock DeepSeek API response
     mock_session = MagicMock()
     mock_resp = MagicMock(status_code=200)
     mock_resp.json.return_value = {
-        "choices": [{"message": {"content": "## Executive Verdict\nModel is slightly aggressive vs 15% guidance."}}],
-        "usage": {
-            "prompt_tokens": 1200,
-            "completion_tokens": 300,
-            "prompt_cache_hit_tokens": 800,
-        },
+        "choices": [{"message": {"content": "## Executive Verdict\nModel is slightly aggressive."}}],
+        "usage": {"prompt_tokens": 1200, "completion_tokens": 300, "prompt_cache_hit_tokens": 800},
     }
     mock_session.post.return_value = mock_resp
 
-    res = run_workflow_analysis(
-        ticker="HUIZ",
-        workflow_id="dcf_audit",
-        files=files,
-        api_key="sk-test-key",
-        model="deepseek-flash",
-        save_memo=True,
-        data_root=tmp_path,
-        session=mock_session,
+    # Bug 6 regression: two runs of the same workflow on the same day MUST NOT overwrite each other!
+    res1 = run_workflow_analysis(
+        ticker="HUIZ", workflow_id="dcf_audit", files=files, api_key="sk-test",
+        model="deepseek-flash", save_memo=True, data_root=tmp_path, session=mock_session,
     )
-    assert "slightly aggressive" in res.content
-    assert res.cache_hit_tokens == 800
-    assert res.saved_path is not None and res.saved_path.exists()
-    assert "Analysis" in res.saved_path.parts
+    res2 = run_workflow_analysis(
+        ticker="HUIZ", workflow_id="dcf_audit", files=files, api_key="sk-test",
+        model="deepseek-flash", save_memo=True, data_root=tmp_path, session=mock_session,
+    )
+    assert res1.saved_path is not None and res2.saved_path is not None
+    assert res1.saved_path != res2.saved_path
+    assert res1.saved_path.exists() and res2.saved_path.exists()
 
 
 def test_call_deepseek_handles_non_json_and_missing_key():

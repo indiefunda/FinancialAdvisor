@@ -328,6 +328,12 @@ def download_and_convert_sec_filings(
         sub_type = (meta.get("type") or "").upper()
         period = meta.get("period", "") or ""
         filing_date = meta.get("filing-date", "") or ""
+        accession = str(
+            meta.get("accession-number")
+            or meta.get("accession_number")
+            or getattr(submission, "accession", "")
+            or ""
+        ).strip()
 
         # Filter by year BEFORE parsing markdown (huge speed win)
         if _extract_year(period, filing_date) < cutoff_year:
@@ -339,13 +345,13 @@ def download_and_convert_sec_filings(
             doc_type = (doc.type or "").upper()
             if not is_useful_document(doc_type, allowed_cover_forms=allowed_covers):
                 continue
-            candidates.append((sub_type, filing_date, doc_type, period, doc))
+            candidates.append((sub_type, filing_date, doc_type, period, accession, doc))
 
     # Deduplicate amended IPO filings (keep latest per base form + doc_type)
     latest_ipo: Dict[Tuple[str, str], Tuple[str, tuple]] = {}
     filtered = []
     for c in candidates:
-        st_, fd, dt, p, doc = c
+        st_, fd, dt, p, acc, doc = c
         base = submission_base(st_)
         if base in IPO_BASES:
             key = (base, dt)
@@ -360,7 +366,7 @@ def download_and_convert_sec_filings(
 
     # ── Step 3: Convert to cleaned Markdown with unique filenames ──────
     used_names: Set[str] = set()
-    for sub_type, filing_date, doc_type, period, doc in filtered:
+    for sub_type, filing_date, doc_type, period, accession, doc in filtered:
         try:
             md_content = doc.markdown
         except Exception:
@@ -371,6 +377,19 @@ def download_and_convert_sec_filings(
             continue
 
         md_content = cleanup_markdown_tables(md_content)
+        front_matter = [
+            "---",
+            f"ticker: {clean_ticker}",
+            f"form_type: {sub_type}",
+            f"doc_type: {doc_type}",
+            f"filing_date: {_format_yyyymmdd(filing_date)}",
+            f"period: {_format_yyyymmdd(period) if period else ''}",
+            f"accession_number: {accession}",
+            "---",
+            "",
+        ]
+        full_md = "\n".join(front_matter) + md_content
+
         raw_fname = make_sec_filename(
             clean_ticker,
             sub_type,
@@ -381,7 +400,7 @@ def download_and_convert_sec_filings(
         )
         fname = deduplicate_filename(raw_fname, used_names)
         out_path = md_dir / fname
-        out_path.write_text(md_content, encoding="utf-8")
+        out_path.write_text(full_md, encoding="utf-8")
         result.converted_files.append(out_path)
 
     return result

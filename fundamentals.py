@@ -18,14 +18,18 @@ import io
 import json
 import logging
 import math
+import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from sec_downloader import DEFAULT_DATA_ROOT, sanitize_ticker
 from transcript_providers import expected_quarters, scan_existing_quarters
+
+_FRONTMATTER_ACC_RE = re.compile(r"^accession_number:\s*(\S+)", re.MULTILINE)
+_FRONTMATTER_DATE_RE = re.compile(r"^filing_date:\s*(\d{4}-\d{2}-\d{2})", re.MULTILINE)
 
 
 # ============================================================================
@@ -120,18 +124,17 @@ def _latest_value(
     preferred_cols: Sequence[str],
     date_cols: Sequence[str] = ("report_date", "price_report_date", "date"),
 ) -> Tuple[Optional[float], str]:
-    """Return `(latest_non_null_value, date_str)` from a DataFrame, or `(None, '')`."""
+    """Return `(latest_non_null_value, date_str)` for an explicitly named column.
+
+    Never falls back to arbitrary trailing columns (such as `*_usd` currency
+    conversions) so reporting-currency values are never silently mixed with USD.
+    """
     if _df_is_empty(df):
         return None, ""
     cols = list(df.columns)
     val_col = next((c for c in preferred_cols if c in cols), None)
     if val_col is None:
-        # Fallback: pick last numeric-looking column not in metadata
-        meta = {"symbol", "report_date", "price_report_date", "date", "period_type", "currency"}
-        candidates = [c for c in cols if c not in meta]
-        if not candidates:
-            return None, ""
-        val_col = candidates[-1]
+        return None, ""
 
     date_col = next((c for c in date_cols if c in cols), None)
     valid = df.dropna(subset=[val_col])
@@ -195,17 +198,31 @@ def _recent_series(
 
 
 def _detect_currency(ticker_obj: Any, dcf_payload: Optional[Dict[str, Any]] = None) -> str:
-    """Best-effort detection of the company's financial reporting currency."""
+    """Detect the company's authoritative financial reporting currency.
+
+    Checks DefeatBeta's `company_meta.get_company_info()` first (works even when
+    DCF fails), then `dcf_data`, then `info()`, defaulting to `USD`.
+    """
+    try:
+        cm = getattr(ticker_obj, "company_meta", None)
+        sym = getattr(ticker_obj, "ticker", None)
+        if cm is not None and sym:
+            meta_info = cm.get_company_info(sym)
+            if isinstance(meta_info, dict) and meta_info.get("financial_currency"):
+                return str(meta_info["financial_currency"]).upper()
+    except Exception:
+        pass
+
     if isinstance(dcf_payload, dict):
         ge = dcf_payload.get("growth_estimates")
         if isinstance(ge, dict) and ge.get("currency"):
             return str(ge["currency"]).upper()
-    # Check info() if currency column exists
+
     info_df = _safe_call(ticker_obj, "info")
     if not _df_is_empty(info_df):
         row = info_df.iloc[0]
         for col in ("financial_currency", "currency", "reporting_currency"):
-            if col in info_df.columns and row.get(col):
+            if col in info_df.columns and row.get(col) and not _is_nan(row.get(col)):
                 return str(row.get(col)).upper()
     return "USD"
 
@@ -278,12 +295,18 @@ def generate_company_brief(
     peg_val, _ = _latest_value(_safe_call(t, "peg_ratio"), ["peg_ratio", "peg"])
     mcap_val, mcap_dt = _latest_value(_safe_call(t, "market_capitalization"), ["market_capitalization", "market_cap"])
     ev_val, _ = _latest_value(_safe_call(t, "enterprise_value"), ["enterprise_value", "ev"])
-    net_debt_val, _ = _latest_value(_safe_call(t, "net_debt_ttm"), ["net_debt_ttm", "net_debt"])
+    net_debt_val, _ = _latest_value(_safe_call(t, "net_debt_ttm"), ["net_debt", "net_debt_ttm"])
     d2e_val, _ = _latest_value(_safe_call(t, "debt_to_equity"), ["debt_to_equity"])
     wacc_val, _ = _latest_value(_safe_call(t, "wacc"), ["wacc"])
     eps_val, _ = _latest_value(_safe_call(t, "ttm_eps"), ["tailing_eps", "ttm_eps", "eps"])
-    rev_val, rev_dt = _latest_value(_safe_call(t, "ttm_revenue"), ["ttm_revenue", "revenue"])
-    fcf_val, _ = _latest_value(_safe_call(t, "ttm_fcf"), ["ttm_fcf", "fcf"])
+
+    rev_df = _safe_call(t, "ttm_revenue")
+    fcf_df = _safe_call(t, "ttm_fcf")
+    # Explicitly read local-currency columns (never accidentally fall back to *_usd!)
+    rev_val, rev_dt = _latest_value(rev_df, ["ttm_total_revenue", "ttm_revenue"])
+    rev_usd_val, _ = _latest_value(rev_df, ["ttm_total_revenue_usd"])
+    fcf_val, _ = _latest_value(fcf_df, ["ttm_free_cash_flow", "ttm_fcf"])
+    fcf_usd_val, _ = _latest_value(fcf_df, ["ttm_free_cash_flow_usd"])
 
     _emit(f"Fetching profitability, returns & growth trends for {clean}...")
     roic_df = _safe_call(t, "roic")
@@ -303,16 +326,19 @@ def generate_company_brief(
     om_val, _ = _latest_value(om_df, ["operating_margin", "quarterly_operating_margin"])
     nm_val, _ = _latest_value(nm_df, ["net_margin", "quarterly_net_margin"])
     fm_val, _ = _latest_value(fm_df, ["fcf_margin", "quarterly_fcf_margin"])
-    yoy_val, _ = _latest_value(yoy_rev_df, ["yoy_growth", "revenue_yoy_growth", "growth"])
+    yoy_val, _ = _latest_value(yoy_rev_df, ["yoy_growth", "revenue_yoy_growth", "total_revenue_yoy_growth"])
 
-    metrics_summary = {
+    market_metrics: Dict[str, str] = {
         "Market Cap (USD)": _fmt_money(mcap_val, "USD"),
-        "Enterprise Value": _fmt_money(ev_val, "USD"),
+        "Enterprise Value (USD)": _fmt_money(ev_val, "USD"),
         "TTM P/E": _fmt_num(pe_val, 2, "x"),
         "P/S Ratio": _fmt_num(ps_val, 2, "x"),
         "P/B Ratio": _fmt_num(pb_val, 2, "x"),
         "PEG Ratio": _fmt_num(peg_val, 2),
-        "TTM EPS": _fmt_num(eps_val, 2),
+        "TTM EPS (Listing Currency)": _fmt_num(eps_val, 2),
+    }
+
+    statement_metrics: Dict[str, str] = {
         f"TTM Revenue ({currency})": _fmt_money(rev_val, currency),
         f"TTM Free Cash Flow ({currency})": _fmt_money(fcf_val, currency),
         f"Net Debt TTM ({currency})": _fmt_money(net_debt_val, currency),
@@ -327,13 +353,20 @@ def generate_company_brief(
         "FCF Margin (Latest Q)": _fmt_pct(fm_val),
         "Revenue YoY Growth (Latest Q)": _fmt_pct(yoy_val),
     }
+    if currency != "USD":
+        if rev_usd_val is not None:
+            statement_metrics["TTM Revenue (USD equiv.)"] = _fmt_money(rev_usd_val, "USD")
+        if fcf_usd_val is not None:
+            statement_metrics["TTM Free Cash Flow (USD equiv.)"] = _fmt_money(fcf_usd_val, "USD")
+
+    metrics_summary = {**market_metrics, **statement_metrics}
 
     lines = [
         f"# {clean} — Company Fundamentals Brief",
         "",
         f"- **Generated:** {date.today().isoformat()}",
         f"- **Source:** DefeatBeta Open Financial Dataset (Hugging Face / DuckDB)",
-        f"- **Financial Reporting Currency:** `{currency}` *(market cap & share price are in listing currency; never mix currencies)*",
+        f"- **Financial Reporting Currency:** `{currency}` *(market multiples are in USD / listing currency — kept in separate tables below)*",
         f"- **Sector / Industry:** {profile.get('sector', 'n/a')} / {profile.get('industry', 'n/a')}",
         f"- **Headquarters:** {profile.get('city', 'n/a')}, {profile.get('country', 'n/a')}",
         f"- **Employees:** {profile.get('full_time_employees', 'n/a')}",
@@ -347,19 +380,33 @@ def generate_company_brief(
         "",
         profile.get("long_business_summary", "_No profile summary available._"),
         "",
-        "## Valuation, Capital Structure & Profitability Snapshot",
+        "## Market Valuation (USD / Listing Currency)",
         "",
         "| Metric | Value |",
         "| :--- | ---: |",
     ]
-    for k, v in metrics_summary.items():
+    for k, v in market_metrics.items():
+        lines.append(f"| {k} | {v} |")
+
+    lines.extend([
+        "",
+        f"## Financial Statements, Returns & Margins (Reporting Currency: `{currency}`)",
+        "",
+        "| Metric | Value |",
+        "| :--- | ---: |",
+    ])
+    for k, v in statement_metrics.items():
         lines.append(f"| {k} | {v} |")
 
     # Multi-period trends table for ROIC / ROE / Revenue Growth / Margins
     trend_sections = [
         ("ROIC Trend (Recent Periods)", _recent_series(roic_df, ["roic"], n=6), True),
         ("ROE Trend (Recent Periods)", _recent_series(roe_df, ["roe"], n=6), True),
-        ("Quarterly Revenue YoY Growth", _recent_series(yoy_rev_df, ["yoy_growth", "revenue_yoy_growth", "growth"], n=6), True),
+        (
+            "Quarterly Revenue YoY Growth",
+            _recent_series(yoy_rev_df, ["yoy_growth", "revenue_yoy_growth", "total_revenue_yoy_growth"], n=6),
+            True,
+        ),
         ("Quarterly Operating Margin", _recent_series(om_df, ["operating_margin", "quarterly_operating_margin"], n=6), True),
     ]
     has_trends = any(pts for _, pts, _ in trend_sections)
@@ -376,22 +423,19 @@ def generate_company_brief(
                 lines.append(f"| {dt_s} | {_fmt_pct(v) if is_pct else _fmt_num(v)} |")
             lines.append("")
 
-    # Revenue breakdown (segment / geography) if present
+    # Revenue breakdown (segment / geography) — keep value & currency, latest period per breakdown!
     if not _df_is_empty(breakdown_df):
-        lines.extend(["## Trailing Revenue Breakdown (Segments / Geography)", ""])
-        try:
-            cols = list(breakdown_df.columns)[:6]
-            lines.append("| " + " | ".join(str(c) for c in cols) + " |")
-            lines.append("| " + " | ".join("---" for _ in cols) + " |")
-            for _, row in breakdown_df.tail(12).iterrows():
-                vals = []
-                for c in cols:
-                    v = row[c]
-                    vals.append("n/a" if _is_nan(v) else str(v))
-                lines.append("| " + " | ".join(vals) + " |")
+        seg_rows = _format_breakdown_rows(breakdown_df, default_currency=currency)
+        if seg_rows:
+            lines.extend([
+                "## Trailing Revenue Breakdown (Latest Period per Segment / Geography)",
+                "",
+                "| Period End | Breakdown | Segment / Series | Revenue |",
+                "| :--- | :--- | :--- | ---: |",
+            ])
+            for dt_s, bname, sname, val_s in seg_rows:
+                lines.append(f"| {dt_s} | {bname} | {sname} | {val_s} |")
             lines.append("")
-        except Exception:
-            pass
 
     out_dir = data_root / clean
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -405,6 +449,53 @@ def generate_company_brief(
         next_earnings_date=next_earnings,
         metrics=metrics_summary,
     )
+
+
+def _format_breakdown_rows(
+    breakdown_df: Any,
+    default_currency: str = "USD",
+) -> List[Tuple[str, str, str, str]]:
+    """Extract latest-period `(report_date, breakdown_name, series_name, formatted_value)` rows."""
+    cols = set(breakdown_df.columns)
+    if "value" not in cols or "series_name" not in cols:
+        return []
+
+    date_col = "report_date" if "report_date" in cols else None
+    bname_col = "breakdown_name" if "breakdown_name" in cols else ("breakdown" if "breakdown" in cols else None)
+    cur_col = "currency" if "currency" in cols else None
+
+    # Find latest report_date per breakdown table so we don't repeat stale quarters
+    latest_date_by_bname: Dict[str, str] = {}
+    parsed: List[Tuple[str, str, str, float, str]] = []
+    for _, row in breakdown_df.iterrows():
+        raw_val = row.get("value")
+        if _is_nan(raw_val):
+            continue
+        try:
+            fval = float(raw_val)
+        except (TypeError, ValueError):
+            continue
+        dt_s = str(row.get(date_col, "") or "")[:10] if date_col else ""
+        bname = str(row.get(bname_col, "") or "Revenue Breakdown").strip() if bname_col else "Revenue Breakdown"
+        sname = str(row.get("series_name", "") or "").strip()
+        if not sname:
+            continue
+        cur = str(row.get(cur_col) or default_currency).upper() if cur_col else default_currency
+        if bname not in latest_date_by_bname or dt_s > latest_date_by_bname[bname]:
+            latest_date_by_bname[bname] = dt_s
+        parsed.append((dt_s, bname, sname, fval, cur))
+
+    rows: List[Tuple[str, str, str, str]] = []
+    seen: Set[Tuple[str, str, str]] = set()
+    for dt_s, bname, sname, fval, cur in parsed:
+        if dt_s != latest_date_by_bname.get(bname, dt_s):
+            continue
+        key = (dt_s, bname, sname)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append((dt_s or "n/a", bname.replace("|", "/"), sname.replace("|", "/"), _fmt_money(fval, cur)))
+    return rows
 
 
 # ============================================================================
@@ -434,8 +525,8 @@ def generate_peers_report(
 
     rows: List[Tuple[str, str, str, str]] = []
     for label, co_method, co_cols, ind_method, ind_cols, is_pct in comparisons:
-        co_val, co_dt = _latest_value(_safe_call(t, co_method), co_cols)
-        ind_val, ind_dt = _latest_value(_safe_call(t, ind_method), ind_cols)
+        co_val, _ = _latest_value(_safe_call(t, co_method), co_cols)
+        ind_val, _ = _latest_value(_safe_call(t, ind_method), ind_cols)
 
         co_str = _fmt_pct(co_val) if is_pct else _fmt_num(co_val, 2, "x")
         ind_str = _fmt_pct(ind_val) if is_pct else _fmt_num(ind_val, 2, "x")
@@ -443,10 +534,7 @@ def generate_peers_report(
         spread = "n/a"
         if co_val is not None and ind_val is not None:
             diff = co_val - ind_val
-            if is_pct:
-                spread = f"{diff * 100:+.2f} pp"
-            else:
-                spread = f"{diff:+.2f}x"
+            spread = f"{diff * 100:+.2f} pp" if is_pct else f"{diff:+.2f}x"
         rows.append((label, co_str, ind_str, spread))
 
     info_df = _safe_call(t, "info")
@@ -488,7 +576,17 @@ class ValuationBundleResult:
     json_path: Optional[Path] = None
     excel_path: Optional[Path] = None
     dcf_data: Optional[Dict[str, Any]] = None
+    model_applicable: bool = False
     warnings: List[str] = field(default_factory=list)
+
+
+def _is_non_positive(val: Any) -> bool:
+    if _is_nan(val):
+        return True
+    try:
+        return float(val) <= 0.0
+    except (TypeError, ValueError):
+        return True
 
 
 def generate_valuation_bundle(
@@ -512,6 +610,7 @@ def generate_valuation_bundle(
     warnings: List[str] = []
     json_path: Optional[Path] = None
     excel_path: Optional[Path] = None
+    model_applicable = False
 
     if isinstance(data, dict):
         json_path = val_dir / "dcf_data.json"
@@ -521,13 +620,27 @@ def generate_valuation_bundle(
         ge = data.get("growth_estimates") or {}
         tpl = data.get("dcf_template") or {}
         dv = data.get("dcf_value") or {}
-        currency = str(ge.get("currency") or "USD").upper()
+        currency = str(ge.get("currency") or _detect_currency(t, data)).upper()
 
         base_fcf = tpl.get("base_fcf")
-        if base_fcf is not None and not _is_nan(base_fcf) and float(base_fcf) <= 0:
+        fair_price = dv.get("fair_price")
+        ev = dv.get("enterprise_value")
+
+        invalid_reasons: List[str] = []
+        if _is_non_positive(base_fcf):
+            invalid_reasons.append(f"Base FCF is non-positive ({_fmt_money(base_fcf, currency)})")
+        if _is_non_positive(ev):
+            invalid_reasons.append("Enterprise Value is non-positive")
+        if _is_non_positive(fair_price):
+            invalid_reasons.append("Estimated Fair Price is non-positive")
+
+        if invalid_reasons:
             warnings.append(
-                f"Base FCF is non-positive ({_fmt_money(base_fcf, currency)}). Standard FCF DCF is unreliable for cash-burning or early-stage companies."
+                "DCF model not applicable: " + "; ".join(invalid_reasons)
+                + ". Standard unlevered FCF DCF is invalid here — use P/S, P/B, ROE, or earnings multiples instead."
             )
+        else:
+            model_applicable = True
 
         info_df = _safe_call(t, "info")
         sector = ""
@@ -543,6 +656,7 @@ def generate_valuation_bundle(
             "",
             f"- **Generated:** {date.today().isoformat()}",
             f"- **Reporting Currency:** `{currency}`",
+            f"- **Model Status:** {'Applicable (reference estimate)' if model_applicable else 'Model not applicable — see caveats'}",
             "- **Disclaimer:** Automated reference DCF model from `defeatbeta-api` — not investment advice. Always cross-examine assumptions against management guidance in earnings transcripts.",
             "",
         ]
@@ -552,22 +666,33 @@ def generate_valuation_bundle(
                 lines.append(f"> - {w}")
             lines.append("")
 
+        if model_applicable:
+            lines.extend([
+                "## Valuation Output",
+                "",
+                "| Field | Value |",
+                "| :--- | ---: |",
+                f"| Current Share Price | {_fmt_num(dv.get('current_price'), 2)} |",
+                f"| Estimated Fair Price | {_fmt_num(fair_price, 2)} |",
+                f"| Margin of Safety | {_fmt_pct(dv.get('margin_of_safety'))} |",
+                f"| Model Label | `{dv.get('recommendation', 'n/a')}` |",
+                f"| Enterprise Value | {_fmt_money(ev, currency)} |",
+                f"| Cash | {_fmt_money(dv.get('cash'), currency)} |",
+                f"| Total Debt | {_fmt_money(dv.get('total_debt'), currency)} |",
+                f"| Implied Equity Value | {_fmt_money(dv.get('equity_value'), currency)} |",
+                f"| Shares Outstanding | {_fmt_money(dv.get('shares_outstanding'))} |",
+                "",
+            ])
+        else:
+            lines.extend([
+                "## Valuation Output",
+                "",
+                "_Valuation output table omitted because the mechanical FCF DCF is not applicable (non-positive base FCF, EV, or fair price). Use the assumptions below together with `CompanyBrief.md` and `Peers.md`._",
+                "",
+            ])
+
         lines.extend([
-            "## Valuation Output",
-            "",
-            "| Field | Value |",
-            "| :--- | ---: |",
-            f"| Current Share Price | {_fmt_num(dv.get('current_price'), 2)} |",
-            f"| Estimated Fair Price | {_fmt_num(dv.get('fair_price'), 2)} |",
-            f"| Margin of Safety | {_fmt_pct(dv.get('margin_of_safety'))} |",
-            f"| Model Label | `{dv.get('recommendation', 'n/a')}` |",
-            f"| Enterprise Value | {_fmt_money(dv.get('enterprise_value'), currency)} |",
-            f"| Cash | {_fmt_money(dv.get('cash'), currency)} |",
-            f"| Total Debt | {_fmt_money(dv.get('total_debt'), currency)} |",
-            f"| Implied Equity Value | {_fmt_money(dv.get('equity_value'), currency)} |",
-            f"| Shares Outstanding | {_fmt_money(dv.get('shares_outstanding'))} |",
-            "",
-            "## Key Model Assumptions (Cross-Examine Against Transcripts!)",
+            "## Key Model Assumptions (For Context & Transcript Cross-Examination)",
             "",
             "| Assumption | Value |",
             "| :--- | ---: |",
@@ -577,7 +702,7 @@ def generate_valuation_bundle(
             f"| Cost of Equity | {_fmt_pct(dr.get('cost_of_equity'))} |",
             f"| Cost of Debt | {_fmt_pct(dr.get('cost_of_debt'))} |",
             f"| Effective Tax Rate | {_fmt_pct(dr.get('tax_rate'))} |",
-            f"| Base FCF ({tpl.get('ttm_period') or 'TTM'}) | {_fmt_money(tpl.get('base_fcf'), currency)} |",
+            f"| Base FCF ({tpl.get('ttm_period') or 'TTM'}) | {_fmt_money(base_fcf, currency)} |",
             f"| Historical FCF Margin | {_fmt_pct(tpl.get('historical_fcf_margin'))} |",
             f"| Assumed FCF Growth (Years 1–5) | {_fmt_pct(tpl.get('growth_rate_1_5y'))} |",
             f"| Assumed FCF Growth (Years 6–10) | {_fmt_pct(tpl.get('growth_rate_6_10y'))} |",
@@ -592,14 +717,14 @@ def generate_valuation_bundle(
             f"# {clean} — DCF Valuation Summary",
             "",
             f"- **Generated:** {date.today().isoformat()}",
-            "- **Status:** Unavailable — DefeatBeta could not compute DCF for this ticker (common for newly IPO'd, negative-FCF, or financial-sector firms).",
+            "- **Model Status:** Unavailable — DefeatBeta could not compute DCF for this ticker (common for newly IPO'd, negative-FCF, or financial-sector firms).",
             "",
         ]
 
     summary_path = val_dir / "DCF_Summary.md"
     summary_path.write_text("\n".join(lines), encoding="utf-8")
 
-    if generate_excel and isinstance(data, dict):
+    if generate_excel and isinstance(data, dict) and model_applicable:
         if on_status:
             on_status(f"Building editable Excel DCF workbook for {clean}...")
         dcf_out = _safe_call(t, "dcf")
@@ -617,6 +742,7 @@ def generate_valuation_bundle(
         json_path=json_path,
         excel_path=excel_path,
         dcf_data=data if isinstance(data, dict) else None,
+        model_applicable=model_applicable,
         warnings=warnings,
     )
 
@@ -635,6 +761,45 @@ class CoverageAuditResult:
     notable_extra_forms: Dict[str, int] = field(default_factory=dict)
 
 
+def _normalize_accession(acc: str) -> str:
+    return re.sub(r"[^0-9]", "", acc or "")
+
+
+def _index_local_sec_files(md_dir: Path) -> Tuple[Set[str], Set[str], List[Path]]:
+    """Index local SEC Markdown files by accession_number (from YAML front-matter)
+    and exact filing_date (from front-matter or filename YYYY-MM-DD).
+    """
+    if not md_dir.exists():
+        return set(), set(), []
+
+    accessions: Set[str] = set()
+    exact_dates: Set[str] = set()
+    files = sorted(md_dir.glob("*.md"))
+
+    for path in files:
+        # Read only the first 512 bytes for YAML front-matter
+        try:
+            head = path.read_text(encoding="utf-8", errors="ignore")[:512]
+        except OSError:
+            head = ""
+
+        if head.startswith("---"):
+            m_acc = _FRONTMATTER_ACC_RE.search(head)
+            if m_acc:
+                norm = _normalize_accession(m_acc.group(1))
+                if norm:
+                    accessions.add(norm)
+            m_dt = _FRONTMATTER_DATE_RE.search(head)
+            if m_dt:
+                exact_dates.add(m_dt.group(1))
+
+        # Legacy filename fallback: exact YYYY-MM-DD in filename (never 4-digit year!)
+        for m_file_dt in re.findall(r"\b(\d{4}-\d{2}-\d{2})\b", path.name):
+            exact_dates.add(m_file_dt)
+
+    return accessions, exact_dates, files
+
+
 def generate_sec_coverage_audit(
     ticker: str,
     num_years: int = 2,
@@ -651,8 +816,7 @@ def generate_sec_coverage_audit(
 
     df = _safe_call(t, "sec_filing")
     md_dir = data_root / clean / "DataFromDataMule_markdown"
-    local_files = sorted(md_dir.glob("*.md")) if md_dir.exists() else []
-    local_names_lower = [p.name.lower() for p in local_files]
+    local_accessions, local_dates, local_files = _index_local_sec_files(md_dir)
 
     cutoff_year = date.today().year - max(1, int(num_years)) + 1
     cutoff_prefix = f"{cutoff_year}-01-01"
@@ -666,20 +830,24 @@ def generate_sec_coverage_audit(
         total_indexed = len(df)
         fdate_col = next((c for c in ("filing_date", "report_date", "date") if c in df.columns), None)
         ftype_col = next((c for c in ("form_type", "form", "type") if c in df.columns), None)
+        acc_col = next((c for c in ("accession_number", "accession") if c in df.columns), None)
         url_col = next((c for c in ("filing_url", "url") if c in df.columns), None)
         desc_col = next((c for c in ("form_type_description", "description") if c in df.columns), None)
 
         for _, row in df.iterrows():
             fdate = str(row.get(fdate_col, "") or "")[:10] if fdate_col else ""
             ftype = str(row.get(ftype_col, "") or "").upper() if ftype_col else ""
+            facc = _normalize_accession(str(row.get(acc_col, "") or "")) if acc_col else ""
             furl = str(row.get(url_col, "") or "") if url_col else ""
             fdesc = str(row.get(desc_col, "") or "") if desc_col else ""
 
             if fdate and fdate >= cutoff_prefix:
-                # Heuristic match against local markdown filenames (date or form+year)
-                matched = any(
-                    (fdate in name) or (ftype.lower().replace("/", " ") in name and fdate[:4] in name)
-                    for name in local_names_lower
+                # Match by exact accession number first (100% reliable),
+                # falling back to exact filing date for legacy files without front-matter.
+                matched = bool(
+                    (facc and facc in local_accessions)
+                    or (not facc and fdate in local_dates)
+                    or (facc and not local_accessions and fdate in local_dates)
                 )
                 recent_rows.append({
                     "date": fdate,
@@ -746,11 +914,7 @@ def build_portfolio_preflight(
     num_years: int = 2,
     data_root: Path = DEFAULT_DATA_ROOT,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Return `(calendar_rows, transcript_matrix_rows)` for a portfolio watchlist.
-
-    Uses `defeatbeta_api.data.tickers.Tickers` for parallel DuckDB/HF catalog fetching
-    with safe degradation if `defeatbeta-api` is missing or a ticker fails.
-    """
+    """Return `(calendar_rows, transcript_matrix_rows)` for a portfolio watchlist."""
     clean_tickers = [sanitize_ticker(tk) for tk in tickers if tk.strip()]
     if not clean_tickers:
         return [], []

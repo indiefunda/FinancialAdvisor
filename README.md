@@ -94,9 +94,24 @@ data/
 
 ---
 
+## CLI Usage
+
+```bash
+# Download & convert SEC filings (default: last 2 years)
+python download_data.py AAPL 2
+python download_data.py YB 3 --forms 20-F,6-K,F-1
+
+# Download earnings call transcripts using the redundant waterfall
+python scrape_transcripts.py AAPL 2
+python scrape_transcripts.py YB 2 --providers defeatbeta,roic,alphavantage
+```
+
+---
+
 ## Running Tests
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -v
+pytest -v                 # fast offline unit tests
+pytest -m slow -v         # optional live schema contract test against defeatbeta-api
 ```

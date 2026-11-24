@@ -1,3 +1,7 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+addopts = "-m 'not slow'"
+markers = [
+    "slow: live network contract tests against upstream APIs / Hugging Face datasets",
+]

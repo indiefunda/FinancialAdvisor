@@ -10,12 +10,10 @@ import streamlit as st
 from ai_analyst import (
     ANALYSIS_WORKFLOWS,
     DEEPSEEK_MODELS,
-    DEFAULT_MODEL,
     SYSTEM_PROMPT_BASE,
     build_dossier_context,
     call_deepseek,
     estimate_cost_usd,
-    estimate_tokens,
     list_dossier_files,
     run_workflow_analysis,
 )

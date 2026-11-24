@@ -757,7 +757,7 @@ def download_transcripts(
                 if pruned:
                     _log(
                         f"  [Catalog Oracle] Marked {len(pruned)} historical quarter(s) as "
-                        "unavailable upstream (saves ROIC/AV/Firecrawl quota)."
+                        "unavailable upstream (saves Alpha Vantage / Firecrawl quota)."
                     )
 
             result.provider_notes["defeatbeta"] = note
