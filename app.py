@@ -17,10 +17,12 @@ from ai_analyst import (
     build_dossier_context,
     call_deepseek_full,
     estimate_cost_usd,
+    extract_valuation_summary,
     list_dossier_files,
     load_valuation_protocol,
     run_workflow_analysis,
     save_valuation_protocol,
+    strip_valuation_summary_tag,
 )
 from config_manager import (
     API_KEY_PROVIDERS,
@@ -837,10 +839,60 @@ with tab_ai:
                         ]
                         st.session_state[f"deepseek_chat_mode_{ai_ticker}"] = last_res.workflow_id
                         st.rerun()
+                def _render_val_cards(md_text: str) -> None:
+                    summary = extract_valuation_summary(md_text)
+                    if not summary:
+                        return
+                    try:
+                        ccy = str(summary.get("currency") or "USD").upper()
+                        yr = summary.get("target_year") or "5Y"
+                        cur_p = float(summary.get("current_price", 0) or 0)
+                        exp_p = float(summary.get("expected_price", 0) or 0)
+                        exp_tot = float(summary.get("expected_total_return_pct", 0) or 0)
+                        exp_irr = float(summary.get("expected_irr_pct", 0) or 0)
+                        base_tot = float(summary.get("base_total_return_pct", 0) or 0)
+                        bear_tot = float(summary.get("bear_total_return_pct", 0) or 0)
+                        bull_tot = float(summary.get("bull_total_return_pct", 0) or 0)
+                        cat_tot = float(summary.get("catastrophe_total_return_pct", 0) or 0)
+                        max_w = float(summary.get("max_weight_pct", 0) or 0)
+                        verdict = str(summary.get("verdict") or "n/a").upper()
+                        ten_k_exp = 10_000 * (1.0 + exp_tot / 100.0)
+                    except (TypeError, ValueError):
+                        return
+
+                    k1, k2, k3, k4 = st.columns(4)
+                    with k1:
+                        st.metric(
+                            f"Expected Return (by {yr})",
+                            f"{exp_tot:+.1f}%",
+                            f"{ccy} {cur_p:.2f} -> {exp_p:.2f}" if cur_p > 0 else f"{exp_irr:+.1f}%/yr",
+                        )
+                    with k2:
+                        st.metric(
+                            f"$10,000 Becomes ({yr})",
+                            f"${ten_k_exp:,.0f}",
+                            f"Base: {base_tot:+.1f}% total",
+                        )
+                    with k3:
+                        st.metric(
+                            "Bear -> Bull (5Y Total)",
+                            f"{bear_tot:+.0f}% to {bull_tot:+.0f}%",
+                            f"Catastrophe: {cat_tot:+.0f}%",
+                            delta_color="off",
+                        )
+                    with k4:
+                        st.metric(
+                            "Verdict & Max Size",
+                            f"{verdict} ({max_w:.1f}%)",
+                            f"Annualized: {exp_irr:+.1f}%/yr",
+                            delta_color="off",
+                        )
+
+                _render_val_cards(last_res.content)
                 if last_res.reasoning:
                     with st.expander(f"🧠 View DeepSeek Internal Reasoning ({len(last_res.reasoning):,} chars)", expanded=False):
                         st.markdown(last_res.reasoning)
-                st.markdown(last_res.content)
+                st.markdown(strip_valuation_summary_tag(last_res.content))
 
             st.divider()
 
@@ -1091,7 +1143,7 @@ with tab_browse:
                     file_name=doc_path.name,
                     mime="text/markdown",
                 )
-                preview_content = strip_sec_metadata_header(content)
+                preview_content = strip_valuation_summary_tag(strip_sec_metadata_header(content))
                 preview_limit = 30000
                 if len(preview_content) > preview_limit:
                     st.caption(f"Showing first {preview_limit:,} of {len(preview_content):,} characters.")

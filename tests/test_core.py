@@ -15,10 +15,12 @@ from ai_analyst import (
     call_deepseek,
     call_deepseek_full,
     estimate_cost_usd,
+    extract_valuation_summary,
     list_dossier_files,
     load_valuation_protocol,
     run_workflow_analysis,
     save_valuation_protocol,
+    strip_valuation_summary_tag,
 )
 from config_manager import (
     QuotaManager,
@@ -649,13 +651,30 @@ def test_call_deepseek_handles_non_json_and_missing_key():
 
 
 def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
-    # 1. Default valuation_protocol.md (v2) loads cleanly with all core guardrails
+    # 1. Default valuation_protocol.md (v2) loads cleanly with all core guardrails + Executive Return Summary
     proto = load_valuation_protocol()
+    assert "Executive Return Summary" in proto
+    assert "Total % Return" in proto
     assert "NO CAPM, NO BETA, NO WACC" in proto
     assert "Share-Class & ADS Ratio Normalization" in proto
     assert "RONIC" in proto
     assert "Phase 6: Mandatory Self-Audit" in proto
     assert "Quarter-Kelly" in proto
+
+    sample_md = (
+        '<!-- valuation-summary-json {"currency":"USD","current_price":3.67,"target_year":2031,'
+        '"expected_price":9.41,"expected_total_return_pct":156.4,"expected_irr_pct":20.9,'
+        '"base_price":9.22,"base_total_return_pct":151.2,"bear_total_return_pct":8.3,'
+        '"bull_total_return_pct":399.1,"catastrophe_total_return_pct":-29.0,'
+        '"max_weight_pct":8.6,"verdict":"CLEARS"} -->\n# Executive Return Summary\nBody'
+    )
+    parsed = extract_valuation_summary(sample_md)
+    assert parsed is not None
+    assert parsed["target_year"] == 2031
+    assert parsed["expected_total_return_pct"] == 156.4
+    stripped = strip_valuation_summary_tag(sample_md)
+    assert stripped.startswith("# Executive Return Summary")
+    assert "valuation-summary-json" not in stripped
 
     # 2. User can save edits to a custom protocol file (and empty text is rejected)
     custom_path = tmp_path / "valuation_protocol.md"

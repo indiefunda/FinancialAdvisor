@@ -65,9 +65,43 @@ SYSTEM_PROMPT_VALUATION = (
     "NEVER use CAPM, Beta, or WACC (ignore any WACC/Beta figures if a reference file mentions them). "
     "Tag every numerical input as `[Filing: Document, Period, Line Item]`, `[Market Data: Source, Date]`, "
     "or `[Assumption]`, or write `\"not provided\"` rather than inventing missing figures. "
+    "Begin your response with a single-line HTML comment JSON summary (exact keys, numeric values without % signs) "
+    "followed immediately by the plain-English Executive Return Summary (At a Glance) table showing Total % Return "
+    "by target year and what $10,000 becomes:\n"
+    "<!-- valuation-summary-json {\"currency\":\"USD\",\"current_price\":0.0,\"target_year\":2031,"
+    "\"expected_price\":0.0,\"expected_total_return_pct\":0.0,\"expected_irr_pct\":0.0,"
+    "\"base_price\":0.0,\"base_total_return_pct\":0.0,\"bear_total_return_pct\":0.0,"
+    "\"bull_total_return_pct\":0.0,\"catastrophe_total_return_pct\":0.0,"
+    "\"max_weight_pct\":0.0,\"verdict\":\"CLEARS\"} -->\n"
     "Show all math transparently, complete the Phase 6 Mandatory Self-Audit table at the end, "
     "and do NOT hedge with generic financial disclaimers."
 )
+
+_VALUATION_SUMMARY_RE = re.compile(
+    r"<!--\s*valuation-summary-json\s*(\{.*?\})\s*-->",
+    re.DOTALL,
+)
+
+
+def extract_valuation_summary(markdown_text: str) -> Optional[Dict[str, Any]]:
+    """Parse the machine-readable `valuation-summary-json` comment emitted at the top of a valuation memo."""
+    if not markdown_text:
+        return None
+    m = _VALUATION_SUMMARY_RE.search(markdown_text)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+        return data if isinstance(data, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def strip_valuation_summary_tag(markdown_text: str) -> str:
+    """Remove the hidden `valuation-summary-json` comment before rendering Markdown in Streamlit."""
+    if not markdown_text:
+        return markdown_text
+    return _VALUATION_SUMMARY_RE.sub("", markdown_text, count=1).lstrip()
 
 
 @dataclass

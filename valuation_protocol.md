@@ -54,6 +54,21 @@ Act as an institutional, fundamental long-term equity analyst (in the tradition 
 
 ## Required Analysis Structure
 
+### Executive Return Summary (At a Glance — Output First!)
+
+Begin every valuation report with a **plain-English Executive Return Summary** so the investor sees the bottom line immediately before reading Phases 1–6:
+
+* **Headline Callout:** State **Today's Price (`YYYY-MM-DD`)**, **Expected 5-Year Target Price (by `YYYY+5`)**, **Expected Total 5-Year Return (`+X%`)**, **Annualized Return (`Y%/yr`)**, **Hurdle Verdict (`CLEARS` / `FAILS`)**, and **Max Position Weight (`Z%`)**.
+* **Plain-English Return Table (by Target Year `YYYY+5`):**
+
+| Scenario | Probability | Horizon | Target Price (Home CCY) | Total % Return | Annualized (IRR) | \$10,000 Becomes |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Catastrophe** | | Year $t_{\text{cat}}$ (`YYYY`) | | | | |
+| **Bear (Stagnation)** | | Year 5 (`YYYY+5`) | | | | |
+| **Base (Normalized)** | | Year 5 (`YYYY+5`) | | | | |
+| **Bull (Re-Rating)** | | Year 5 (`YYYY+5`) | | | | |
+| **Expected (Probability-Weighted)** | **100%** | **5 Years (`YYYY+5`)** | | **+X%** | **+Y%/yr** | **\$XX,XXX** |
+
 ### Phase 1: Forensic Baseline, Clean Run-Rate & Zero-Growth Floor
 
 Extract or compute from the latest quarterly/annual reports and current market data:
@@ -264,13 +279,13 @@ $$
 
   * Include any net dividends actually collected *prior* to $t_{\text{cat}}$ at their exact dates in the home-currency cash-flow vector, with terminal recovery at $t_{\text{cat}}$ and zero cash flows thereafter. Explicitly distinguish partial impairment from total ($-100\%$) loss.
 
-| Scenario | Probability (%) | Year 5 NOPAT | Exit Multiple | Terminal Value/Share (Home CCY) | Total Multiple (MOIC) | 5-Year IRR (Home CCY) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Catastrophe (at $t_{\text{cat}}$)** | [Evidence-based] | — | — | [Explicit recovery build] | | |
-| **Bear (Stagnation)** | [Evidence-based] | | | | | |
-| **Base (Normalized)** | [Evidence-based] | | | | | |
-| **Bull (Re-Rating)** | [Evidence-based] | | | | | |
-| **Expected Value (Weighted)** | **100%** | — | — | **Weighted Price** | **Weighted MOIC** | **Expected IRR** |
+| Scenario | Probability (%) | Year 5 NOPAT | Exit Multiple | Terminal Value/Share (Home CCY) | Total Return (%) | Total Multiple (MOIC) | 5-Year IRR (Home CCY) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Catastrophe (at $t_{\text{cat}}$)** | [Evidence-based] | — | — | [Explicit recovery build] | | | |
+| **Bear (Stagnation)** | [Evidence-based] | | | | | | |
+| **Base (Normalized)** | [Evidence-based] | | | | | | |
+| **Bull (Re-Rating)** | [Evidence-based] | | | | | | |
+| **Expected Value (Weighted)** | **100%** | — | — | **Weighted Price** | **Weighted %** | **Weighted MOIC** | **Expected IRR** |
 
 * **Unified Expected IRR Rule (Probability-Weighted Annual Cash-Flow Vector):**
 
