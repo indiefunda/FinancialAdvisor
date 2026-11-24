@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import requests
 
 from config_manager import PROVIDER_SPECS
-from sec_downloader import DEFAULT_DATA_ROOT, sanitize_ticker
+from sec_downloader import DEFAULT_DATA_ROOT, sanitize_ticker, strip_sec_metadata_header
 
 DEEPSEEK_API_URL = f"{PROVIDER_SPECS['deepseek']['base_url'].rstrip('/')}/chat/completions"
 _TRANSCRIPT_PERIOD_RE = re.compile(r"Q([1-4])\s+(\d{4})", re.IGNORECASE)
@@ -215,7 +215,9 @@ def build_dossier_context(
             truncated_notes.append(f"Skipped `{df.rel_label}` (context budget reached)")
             continue
         try:
-            text = df.path.read_text(encoding="utf-8", errors="replace").strip()
+            text = strip_sec_metadata_header(
+                df.path.read_text(encoding="utf-8", errors="replace")
+            ).strip()
         except OSError:
             continue
         if not text:

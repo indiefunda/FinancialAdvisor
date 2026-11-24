@@ -41,6 +41,7 @@ from sec_downloader import (
     FORM_CATEGORIES,
     download_and_convert_sec_filings,
     sanitize_ticker,
+    strip_sec_metadata_header,
 )
 from transcript_providers import download_transcripts
 
@@ -827,9 +828,10 @@ with tab_browse:
                     file_name=doc_path.name,
                     mime="text/markdown",
                 )
+                preview_content = strip_sec_metadata_header(content)
                 preview_limit = 30000
-                if len(content) > preview_limit:
-                    st.caption(f"Showing first {preview_limit:,} of {len(content):,} characters.")
-                    st.markdown(content[:preview_limit] + "\n\n*... (truncated for preview)*")
+                if len(preview_content) > preview_limit:
+                    st.caption(f"Showing first {preview_limit:,} of {len(preview_content):,} characters.")
+                    st.markdown(preview_content[:preview_limit] + "\n\n*... (truncated for preview)*")
                 else:
-                    st.markdown(content)
+                    st.markdown(preview_content)

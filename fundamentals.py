@@ -423,14 +423,14 @@ def generate_company_brief(
                 lines.append(f"| {dt_s} | {_fmt_pct(v) if is_pct else _fmt_num(v)} |")
             lines.append("")
 
-    # Revenue breakdown (segment / geography) — keep value & currency, latest period per breakdown!
+    # Segment & breakdown metrics — keep value & unit, latest period per breakdown!
     if not _df_is_empty(breakdown_df):
         seg_rows = _format_breakdown_rows(breakdown_df, default_currency=currency)
         if seg_rows:
             lines.extend([
-                "## Trailing Revenue Breakdown (Latest Period per Segment / Geography)",
+                "## Trailing Segment & Breakdown Metrics (Latest Period)",
                 "",
-                "| Period End | Breakdown | Segment / Series | Revenue |",
+                "| Period End | Breakdown | Segment / Series | Value |",
                 "| :--- | :--- | :--- | ---: |",
             ])
             for dt_s, bname, sname, val_s in seg_rows:
@@ -451,6 +451,17 @@ def generate_company_brief(
     )
 
 
+_PCT_BREAKDOWN_KEYWORDS = ("margin", "percent", "%", "share of", "mix", "growth", "rate", "ratio")
+
+
+def _is_percentage_breakdown(breakdown_name: str, series_name: str, value_type: str = "") -> bool:
+    """Detect percentage/margin breakdowns even when upstream mislabels value_type as CURRENCY."""
+    if value_type.strip().upper() in ("PERCENT", "PERCENTAGE", "RATIO"):
+        return True
+    combined = f"{breakdown_name} {series_name}".lower()
+    return any(kw in combined for kw in _PCT_BREAKDOWN_KEYWORDS)
+
+
 def _format_breakdown_rows(
     breakdown_df: Any,
     default_currency: str = "USD",
@@ -463,10 +474,11 @@ def _format_breakdown_rows(
     date_col = "report_date" if "report_date" in cols else None
     bname_col = "breakdown_name" if "breakdown_name" in cols else ("breakdown" if "breakdown" in cols else None)
     cur_col = "currency" if "currency" in cols else None
+    vtype_col = "value_type" if "value_type" in cols else None
 
     # Find latest report_date per breakdown table so we don't repeat stale quarters
     latest_date_by_bname: Dict[str, str] = {}
-    parsed: List[Tuple[str, str, str, float, str]] = []
+    parsed: List[Tuple[str, str, str, float, str, str]] = []
     for _, row in breakdown_df.iterrows():
         raw_val = row.get("value")
         if _is_nan(raw_val):
@@ -481,20 +493,25 @@ def _format_breakdown_rows(
         if not sname:
             continue
         cur = str(row.get(cur_col) or default_currency).upper() if cur_col else default_currency
+        vtype = str(row.get(vtype_col) or "") if vtype_col else ""
         if bname not in latest_date_by_bname or dt_s > latest_date_by_bname[bname]:
             latest_date_by_bname[bname] = dt_s
-        parsed.append((dt_s, bname, sname, fval, cur))
+        parsed.append((dt_s, bname, sname, fval, cur, vtype))
 
     rows: List[Tuple[str, str, str, str]] = []
     seen: Set[Tuple[str, str, str]] = set()
-    for dt_s, bname, sname, fval, cur in parsed:
+    for dt_s, bname, sname, fval, cur, vtype in parsed:
         if dt_s != latest_date_by_bname.get(bname, dt_s):
             continue
         key = (dt_s, bname, sname)
         if key in seen:
             continue
         seen.add(key)
-        rows.append((dt_s or "n/a", bname.replace("|", "/"), sname.replace("|", "/"), _fmt_money(fval, cur)))
+        if _is_percentage_breakdown(bname, sname, vtype):
+            val_str = f"{fval:.2f}%"
+        else:
+            val_str = _fmt_money(fval, cur)
+        rows.append((dt_s or "n/a", bname.replace("|", "/"), sname.replace("|", "/"), val_str))
     return rows
 
 
@@ -766,8 +783,8 @@ def _normalize_accession(acc: str) -> str:
 
 
 def _index_local_sec_files(md_dir: Path) -> Tuple[Set[str], Set[str], List[Path]]:
-    """Index local SEC Markdown files by accession_number (from YAML front-matter)
-    and exact filing_date (from front-matter or filename YYYY-MM-DD).
+    """Index local SEC Markdown files by accession_number (from HTML metadata comment
+    or legacy YAML front-matter) and exact filing_date (from header or filename YYYY-MM-DD).
     """
     if not md_dir.exists():
         return set(), set(), []
@@ -777,13 +794,13 @@ def _index_local_sec_files(md_dir: Path) -> Tuple[Set[str], Set[str], List[Path]
     files = sorted(md_dir.glob("*.md"))
 
     for path in files:
-        # Read only the first 512 bytes for YAML front-matter
+        # Read only the first 512 bytes for metadata header
         try:
             head = path.read_text(encoding="utf-8", errors="ignore")[:512]
         except OSError:
             head = ""
 
-        if head.startswith("---"):
+        if head.startswith("<!--") or head.startswith("---"):
             m_acc = _FRONTMATTER_ACC_RE.search(head)
             if m_acc:
                 norm = _normalize_accession(m_acc.group(1))

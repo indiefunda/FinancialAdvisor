@@ -471,11 +471,12 @@ def _make_mock_ticker(sector="Financial Services", currency="CNY", base_fcf=-15_
     t.quarterly_net_margin.return_value = _FakeDF([{"report_date": "2026-09-30", "net_margin": 0.09}])
     t.quarterly_fcf_margin.return_value = _FakeDF([])
     t.quarterly_revenue_yoy_growth.return_value = _FakeDF([{"report_date": "2026-09-30", "yoy_growth": 0.21}])
-    # Real DefeatBeta breakdown schema with value + currency + multiple dates (Bug 4 regression!)
+    # Real DefeatBeta breakdown schema with value + currency + multiple dates + mislabeled margin row
     t.trailing_revenue_by_breakdown.return_value = _FakeDF([
-        {"symbol": "HUIZ", "breakdown": "revenue-by-segment", "breakdown_name": "Revenue by Segment", "period_type": "trailing", "report_date": "2025-09-30", "series_name": "Old Row", "value": 500_000_000, "currency": "CNY"},
-        {"symbol": "HUIZ", "breakdown": "revenue-by-segment", "breakdown_name": "Revenue by Segment", "period_type": "trailing", "report_date": "2026-09-30", "series_name": "Life Insurance", "value": 900_000_000, "currency": "CNY"},
-        {"symbol": "HUIZ", "breakdown": "revenue-by-segment", "breakdown_name": "Revenue by Segment", "period_type": "trailing", "report_date": "2026-09-30", "series_name": "Health Insurance", "value": 436_186_000, "currency": "CNY"},
+        {"symbol": "HUIZ", "breakdown": "revenue-by-segment", "breakdown_name": "Revenue by Segment", "period_type": "trailing", "report_date": "2025-09-30", "series_name": "Old Row", "value": 500_000_000, "currency": "CNY", "value_type": "CURRENCY"},
+        {"symbol": "HUIZ", "breakdown": "revenue-by-segment", "breakdown_name": "Revenue by Segment", "period_type": "trailing", "report_date": "2026-09-30", "series_name": "Life Insurance", "value": 900_000_000, "currency": "CNY", "value_type": "CURRENCY"},
+        {"symbol": "HUIZ", "breakdown": "revenue-by-segment", "breakdown_name": "Revenue by Segment", "period_type": "trailing", "report_date": "2026-09-30", "series_name": "Health Insurance", "value": 436_186_000, "currency": "CNY", "value_type": "CURRENCY"},
+        {"symbol": "HUIZ", "breakdown": "gross-margin-by-type", "breakdown_name": "Gross Margin by Type", "period_type": "trailing", "report_date": "2026-09-30", "series_name": "Products", "value": 39.0, "currency": "USD", "value_type": "CURRENCY"},
     ])
 
     t.industry_ttm_pe.return_value = _FakeDF([{"report_date": "2026-11-20", "industry_pe": 15.0}])
@@ -529,10 +530,12 @@ def test_fundamentals_currency_segments_invalid_dcf_and_accession_coverage(tmp_p
     assert brief.metrics["TTM Revenue (USD equiv.)"] == "USD 186.30M"
     assert brief.metrics["ROIC"] == "n/a"
 
-    # Bug 4: Segment table MUST include revenue values + currency and only latest report_date!
+    # Bug 4 & margin-unit fix: Segment table MUST include values + units, only latest date, and % for margins!
     brief_text = brief.path.read_text(encoding="utf-8")
     assert "Life Insurance | CNY 900.00M" in brief_text
     assert "Health Insurance | CNY 436.19M" in brief_text
+    assert "Gross Margin by Type | Products | 39.00%" in brief_text
+    assert "USD 39.00" not in brief_text
     assert "Old Row" not in brief_text
 
     peers_path = generate_peers_report("HUIZ", data_root=tmp_path, ticker_obj=mock_t)
@@ -549,11 +552,11 @@ def test_fundamentals_currency_segments_invalid_dcf_and_accession_coverage(tmp_p
     assert "152.57%" not in dcf_text
     assert "WACC / Discount Rate" in dcf_text  # Assumptions still kept for context
 
-    # Bug 2: Accession-number matching eliminates off-by-one FY2025 vs 2026-04-24 mismatch!
+    # Bug 2 & HTML-comment metadata: Accession-number matching works with hidden HTML comment header!
     sec_dir = tmp_path / "HUIZ" / "DataFromDataMule_markdown"
     sec_dir.mkdir(parents=True, exist_ok=True)
     (sec_dir / "HUIZ - 20-F FY 2025.md").write_text(
-        "---\nticker: HUIZ\nform_type: 20-F\nfiling_date: 2026-04-24\naccession_number: 0001193125-26-000111\n---\n# 20-F",
+        "<!-- financial-advisor-meta\nticker: HUIZ\nform_type: 20-F\nfiling_date: 2026-04-24\naccession_number: 0001193125-26-000111\n-->\n# 20-F Body",
         encoding="utf-8",
     )
 
@@ -572,8 +575,13 @@ def test_deepseek_transcript_sorting_and_unique_same_day_memos(tmp_path: Path):
     t_dir = tmp_path / "HUIZ"
     (t_dir / "Valuation").mkdir(parents=True)
     (t_dir / "EarningsTranscripts").mkdir(parents=True)
+    (t_dir / "DataFromDataMule_markdown").mkdir(parents=True)
     (t_dir / "CompanyBrief.md").write_text("# HUIZ Brief\nROIC: 14%\n", encoding="utf-8")
     (t_dir / "Valuation" / "DCF_Summary.md").write_text("# DCF\nAssumed Growth: 18%\n", encoding="utf-8")
+    (t_dir / "DataFromDataMule_markdown" / "HUIZ - 20-F FY 2025.md").write_text(
+        "<!-- financial-advisor-meta\nticker: HUIZ\naccession_number: 0001193125-26-000111\n-->\n\n# Annual Report Body\n",
+        encoding="utf-8",
+    )
 
     # Bug 5 regression: string reverse sort would put Q4 2024 before Q2 2025!
     for fname in ("HUIZ - Q4 2024.md", "HUIZ - Q3 2024.md", "HUIZ - Q1 2025.md", "HUIZ - Q2 2025.md"):
@@ -590,6 +598,9 @@ def test_deepseek_transcript_sorting_and_unique_same_day_memos(tmp_path: Path):
 
     ctx, trunc = build_dossier_context(files)
     assert "FILE: CompanyBrief.md" in ctx
+    assert "# Annual Report Body" in ctx
+    assert "financial-advisor-meta" not in ctx
+    assert "accession_number:" not in ctx
     assert trunc == []
 
     c_miss = estimate_cost_usd("deepseek-flash", 100_000, 2_000, cache_hit_tokens=0)

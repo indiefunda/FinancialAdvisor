@@ -237,6 +237,28 @@ def deduplicate_filename(filename: str, used_names: Set[str]) -> str:
         idx += 1
 
 
+_HTML_META_HEADER_RE = re.compile(
+    r"\A<!--\s*financial-advisor-meta\s*\n.*?\n-->\s*\n*",
+    re.DOTALL,
+)
+_YAML_META_HEADER_RE = re.compile(
+    r"\A---\s*\n(?:[^\n]*\n){1,12}?---\s*\n*",
+)
+
+
+def strip_sec_metadata_header(text: str) -> str:
+    """Remove machine-readable SEC metadata header (HTML comment or legacy YAML front-matter)."""
+    if not text:
+        return text
+    cleaned = _HTML_META_HEADER_RE.sub("", text, count=1)
+    if cleaned != text:
+        return cleaned
+    m = _YAML_META_HEADER_RE.match(text)
+    if m and ("accession_number:" in m.group(0) or "form_type:" in m.group(0)):
+        return text[m.end():]
+    return text
+
+
 @dataclass
 class SecDownloadResult:
     ticker: str
@@ -377,18 +399,18 @@ def download_and_convert_sec_filings(
             continue
 
         md_content = cleanup_markdown_tables(md_content)
-        front_matter = [
-            "---",
+        meta_comment = [
+            "<!-- financial-advisor-meta",
             f"ticker: {clean_ticker}",
             f"form_type: {sub_type}",
             f"doc_type: {doc_type}",
             f"filing_date: {_format_yyyymmdd(filing_date)}",
             f"period: {_format_yyyymmdd(period) if period else ''}",
             f"accession_number: {accession}",
-            "---",
+            "-->",
             "",
         ]
-        full_md = "\n".join(front_matter) + md_content
+        full_md = "\n".join(meta_comment) + md_content
 
         raw_fname = make_sec_filename(
             clean_ticker,
