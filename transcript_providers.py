@@ -10,6 +10,9 @@ Implements a redundancy waterfall designed to maximize free-tier API allowances:
 
 from __future__ import annotations
 
+import contextlib
+import io
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -50,6 +53,7 @@ class TranscriptRunResult:
     saved_files: List[Tuple[str, Path]] = field(default_factory=list)  # (provider, path)
     cached_quarters: List[Tuple[int, int]] = field(default_factory=list)
     missing_quarters: List[Tuple[int, int]] = field(default_factory=list)
+    unavailable_upstream: List[Tuple[int, int]] = field(default_factory=list)
     provider_notes: Dict[str, str] = field(default_factory=dict)
     logs: List[str] = field(default_factory=list)
 
@@ -151,6 +155,7 @@ def fetch_from_defeatbeta(
     cutoff_year: int,
     skip_quarters: Set[Tuple[int, int]],
     log: Callable[[str], None],
+    catalog_out: Optional[Set[Tuple[int, int]]] = None,
 ) -> Tuple[List[TranscriptRecord], str]:
     """Fetch available transcripts from `defeatbeta-api` (Hugging Face dataset)."""
     try:
@@ -160,9 +165,11 @@ def fetch_from_defeatbeta(
 
     records: List[TranscriptRecord] = []
     try:
-        t = DBTicker(ticker)
-        tr = t.earning_call_transcripts()
-        df_list = tr.get_transcripts_list()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            t = DBTicker(ticker, log_level=logging.ERROR)
+            tr = t.earning_call_transcripts()
+            df_list = tr.get_transcripts_list()
     except Exception as exc:
         return [], f"DefeatBeta lookup failed: {exc}"
 
@@ -176,12 +183,16 @@ def fetch_from_defeatbeta(
             q = int(row["fiscal_quarter"])
         except (KeyError, TypeError, ValueError):
             continue
+        if catalog_out is not None:
+            catalog_out.add((yr, q))
         if yr < cutoff_year or (yr, q) in skip_quarters:
             continue
 
         report_date = str(row.get("report_date", "") or "")
         try:
-            df_call = tr.get_transcript(yr, q)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                df_call = tr.get_transcript(yr, q)
         except Exception as exc:
             log(f"  [DefeatBeta] Q{q} {yr} error: {exc}")
             continue
@@ -704,8 +715,11 @@ def download_transcripts(
             f"Local cache hit: {len(result.cached_quarters)} quarter(s) already on disk (0 API calls)."
         )
 
+    unavailable: Set[Tuple[int, int]] = set()
+    latest_target = targets[0] if targets else None
+
     def _missing() -> List[Tuple[int, int]]:
-        return [q_key for q_key in targets if q_key not in acquired]
+        return [q_key for q_key in targets if q_key not in acquired and q_key not in unavailable]
 
     def _save_records(recs: List[TranscriptRecord]) -> None:
         for rec in recs:
@@ -714,6 +728,7 @@ def download_transcripts(
                 continue
             out_path = save_transcript_record(rec, transcripts_dir)
             acquired.add(key)
+            unavailable.discard(key)
             result.saved_files.append((rec.provider, out_path))
 
     # ── Run enabled providers in the exact order requested ─────────────
@@ -723,8 +738,28 @@ def download_transcripts(
 
         if prov == "defeatbeta":
             _log("Checking DefeatBeta (Hugging Face open dataset — unlimited)...")
-            recs, note = fetch_from_defeatbeta(clean_ticker, cutoff_year, acquired, _log)
+            catalog: Set[Tuple[int, int]] = set()
+            try:
+                recs, note = fetch_from_defeatbeta(
+                    clean_ticker, cutoff_year, acquired, _log, catalog_out=catalog
+                )
+            except TypeError:
+                recs, note = fetch_from_defeatbeta(clean_ticker, cutoff_year, acquired, _log)
             _save_records(recs)
+
+            if catalog:
+                earliest = min(catalog)
+                pruned = []
+                for q_key in list(_missing()):
+                    if q_key < earliest or (q_key != latest_target and q_key not in catalog):
+                        unavailable.add(q_key)
+                        pruned.append(q_key)
+                if pruned:
+                    _log(
+                        f"  [Catalog Oracle] Marked {len(pruned)} historical quarter(s) as "
+                        "unavailable upstream (saves ROIC/AV/Firecrawl quota)."
+                    )
+
             result.provider_notes["defeatbeta"] = note
 
         elif prov == "roic":
@@ -769,5 +804,6 @@ def download_transcripts(
         else:
             result.provider_notes[prov] = f"Unknown provider '{prov}' — skipped"
 
+    result.unavailable_upstream = sorted(unavailable, reverse=True)
     result.missing_quarters = _missing()
     return result

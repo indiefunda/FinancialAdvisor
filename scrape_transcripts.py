@@ -62,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"  DONE! New: {len(result.saved_files)} | "
         f"Cached: {len(result.cached_quarters)} | "
+        f"Unavailable Upstream: {len(result.unavailable_upstream)} | "
         f"Missing: {len(result.missing_quarters)}"
     )
     for provider, path in result.saved_files:

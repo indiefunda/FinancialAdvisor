@@ -1,4 +1,4 @@
-"""FinancialAdvisor — Streamlit UI for SEC Filings & Redundant Earnings Transcripts."""
+"""FinancialAdvisor — Streamlit UI for SEC Filings, Transcripts, Fundamentals/DCF & DeepSeek AI."""
 
 from __future__ import annotations
 
@@ -7,13 +7,35 @@ from typing import Dict, List
 
 import streamlit as st
 
+from ai_analyst import (
+    ANALYSIS_WORKFLOWS,
+    DEEPSEEK_MODELS,
+    DEFAULT_MODEL,
+    SYSTEM_PROMPT_BASE,
+    build_dossier_context,
+    call_deepseek,
+    estimate_cost_usd,
+    estimate_tokens,
+    list_dossier_files,
+    run_workflow_analysis,
+)
 from config_manager import (
+    API_KEY_PROVIDERS,
     DEFAULT_PROVIDER_ORDER,
     PROVIDER_SPECS,
     QuotaManager,
-    load_api_keys,
+    load_api_keys_with_sources,
+    load_stored_api_keys,
     mask_key,
     save_api_keys,
+)
+from fundamentals import (
+    build_portfolio_preflight,
+    create_quiet_ticker,
+    generate_company_brief,
+    generate_peers_report,
+    generate_sec_coverage_audit,
+    generate_valuation_bundle,
 )
 from sec_downloader import (
     DEFAULT_DATA_ROOT,
@@ -25,13 +47,13 @@ from sec_downloader import (
 from transcript_providers import download_transcripts
 
 st.set_page_config(
-    page_title="FinancialAdvisor — SEC & Transcripts",
+    page_title="FinancialAdvisor — Research & DeepSeek AI",
     page_icon="📊",
     layout="wide",
 )
 
 # ── Load local gitignored secrets & quota state ──────────────────────────────
-api_keys: Dict[str, str] = load_api_keys()
+api_keys, key_sources = load_api_keys_with_sources()
 quota = QuotaManager()
 
 # ============================================================================
@@ -42,18 +64,31 @@ with st.sidebar:
 
     # ── API Key Status Summary ───────────────────────────────────────────────
     st.subheader("API Key Status")
-    for p_id in ("roic", "alphavantage", "firecrawl"):
+    for p_id in API_KEY_PROVIDERS:
         spec = PROVIDER_SPECS[p_id]
         key_val = api_keys.get(p_id, "")
-        badge = f"✅ `{mask_key(key_val)}`" if key_val else "⚪ Not configured"
+        src = key_sources.get(p_id, "")
+        if key_val:
+            src_tag = " *(env)*" if src == "env" else " *(local)*"
+            badge = f"✅ `{mask_key(key_val)}`{src_tag}"
+        else:
+            badge = "⚪ Not configured"
         st.markdown(f"**{spec['label']}**: {badge}")
 
     # ── Click-to-Configure API Keys Panel ────────────────────────────────────
     with st.expander("🔑 Add / Update API Keys", expanded=False):
         st.caption(
-            "Keys are saved locally to `.secrets.json` (gitignored) and never committed."
+            "Keys are saved locally to `.secrets.json` (gitignored) and never committed. "
+            "Environment-variable keys are never written to disk."
         )
         with st.form("api_keys_form", clear_on_submit=False):
+            new_deepseek = st.text_input(
+                "DeepSeek API Key",
+                value="",
+                type="password",
+                placeholder="Leave blank to keep existing key",
+                help="Powers the DeepSeek AI Analyst tab (1M context, V4.1-Flash / V4-Pro)",
+            )
             new_roic = st.text_input(
                 "ROIC.ai API Key",
                 value="",
@@ -77,14 +112,16 @@ with st.sidebar:
             )
             save_clicked = st.form_submit_button("💾 Save API Keys", type="primary")
             if save_clicked:
-                updated = dict(api_keys)
+                stored = load_stored_api_keys()
+                if new_deepseek.strip():
+                    stored["deepseek"] = new_deepseek.strip()
                 if new_roic.strip():
-                    updated["roic"] = new_roic.strip()
+                    stored["roic"] = new_roic.strip()
                 if new_av.strip():
-                    updated["alphavantage"] = new_av.strip()
+                    stored["alphavantage"] = new_av.strip()
                 if new_fc.strip():
-                    updated["firecrawl"] = new_fc.strip()
-                save_api_keys(updated)
+                    stored["firecrawl"] = new_fc.strip()
+                save_api_keys(stored)
                 st.success("API keys saved to local `.secrets.json`.")
                 st.rerun()
 
@@ -119,12 +156,12 @@ with st.sidebar:
         st.rerun()
 
 # ============================================================================
-# MAIN PAGE HEADER & SHARED CONTROLS
+# MAIN PAGE HEADER & TABS
 # ============================================================================
-st.title("📊 FinancialAdvisor — SEC Filings & Earnings Transcripts")
+st.title("📊 FinancialAdvisor — Equity Research Workbench")
 st.caption(
-    "Download clean, LLM-ready SEC filings and earnings call transcripts (Prepared Remarks + Q&A) "
-    "into `data/<TICKER>/`."
+    "SEC EDGAR filings + redundant earnings transcripts + DefeatBeta fundamentals/DCF + "
+    "DeepSeek AI cross-examination in `data/<TICKER>/`."
 )
 
 # Build form label lookups
@@ -139,11 +176,13 @@ for _cat, _forms in FORM_CATEGORIES.items():
 all_form_labels = list(form_display_labels.values())
 default_labels = [form_display_labels[c] for c in DEFAULT_FORM_CODES if c in form_display_labels]
 
-tab_sec, tab_tr, tab_batch, tab_browse = st.tabs(
+tab_sec, tab_tr, tab_fund, tab_ai, tab_batch, tab_browse = st.tabs(
     [
         "📄 SEC Filings",
-        "🎙️ Earnings Transcripts (Q&A)",
-        "📦 Portfolio Batch (10 Stocks)",
+        "🎙️ Transcripts (Q&A)",
+        "📈 Fundamentals & DCF",
+        "🧠 DeepSeek AI Analyst",
+        "📦 Portfolio Batch",
         "📁 Browse Files",
     ]
 )
@@ -159,7 +198,7 @@ with tab_sec:
         sec_ticker = st.text_input(
             "Stock Ticker",
             value="",
-            placeholder="e.g. AAPL, YB, HUIZ, MSFT",
+            placeholder="e.g. AAPL, YB, HUIZ, JFIN, LU, UPST",
             key="sec_ticker",
         ).strip().upper()
     with c2:
@@ -187,7 +226,13 @@ with tab_sec:
         extra = [f.strip().upper() for f in custom_forms.split(",") if f.strip()]
         selected_forms = list(dict.fromkeys(selected_forms + extra))
 
-    if st.button("Download & Convert SEC Filings", type="primary"):
+    b_sec1, b_sec2 = st.columns([2, 1])
+    with b_sec1:
+        run_sec_btn = st.button("Download & Convert SEC Filings", type="primary")
+    with b_sec2:
+        run_cov_btn = st.button("🔍 Audit Coverage vs. EDGAR Index")
+
+    if run_sec_btn:
         if not sec_ticker:
             st.warning("Please enter a stock ticker first.")
         elif not selected_forms:
@@ -229,15 +274,41 @@ with tab_sec:
                                 st.warning(f"**{form}**: {msg}")
                     st.info(f"Markdown saved to: `{res.markdown_dir}`")
 
+    if run_cov_btn:
+        if not sec_ticker:
+            st.warning("Please enter a stock ticker first.")
+        else:
+            try:
+                clean_t = sanitize_ticker(sec_ticker)
+                with st.status(f"Auditing SEC coverage for {clean_t}...", expanded=True) as status:
+                    cov = generate_sec_coverage_audit(
+                        clean_t,
+                        num_years=int(sec_years),
+                        on_status=lambda m: status.write(m),
+                    )
+                    status.update(label="Coverage audit complete", state="complete")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("All-Time Indexed", cov.total_indexed)
+                m2.metric(f"In Last {int(sec_years)} Yr(s)", cov.recent_indexed)
+                m3.metric("Local Markdown Files", cov.local_markdown_count)
+                if cov.notable_extra_forms:
+                    st.info(
+                        "Notable insider/ownership filings detected: "
+                        + ", ".join(f"`{k}` ({v})" for k, v in sorted(cov.notable_extra_forms.items()))
+                    )
+                st.markdown(cov.path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                st.error(f"Coverage audit failed: {exc}")
+
 
 # ============================================================================
-# TAB 2: EARNINGS CALL TRANSCRIPTS (REDUNDANT WATERFALL)
+# TAB 2: EARNINGS CALL TRANSCRIPTS (REDUNDANT WATERFALL + CATALOG ORACLE)
 # ============================================================================
 with tab_tr:
     st.subheader("Download Earnings Call Transcripts (Prepared Remarks + Q&A)")
     st.caption(
-        "Automatically uses **Local Cache → DefeatBeta (unlimited) → ROIC.ai (latest 2 calls) "
-        "→ Alpha Vantage (25/day) → Firecrawl (fallback)** to maximize your free tiers."
+        "Automatically uses **Local Cache → DefeatBeta (unlimited + catalog oracle) → ROIC.ai (latest 2 calls) "
+        "→ Alpha Vantage (25/day) → Firecrawl (fallback)** to maximize free tiers."
     )
 
     c1, c2, c3 = st.columns([2, 1, 1])
@@ -286,10 +357,11 @@ with tab_tr:
                     )
                     status.update(label="Transcript download complete", state="complete")
 
-                m1, m2, m3 = st.columns(3)
+                m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Newly Downloaded", len(res.saved_files))
                 m2.metric("Reused from Cache", len(res.cached_quarters))
-                m3.metric("Still Missing", len(res.missing_quarters))
+                m3.metric("Unavailable Upstream", len(res.unavailable_upstream))
+                m4.metric("Still Missing", len(res.missing_quarters))
 
                 if res.provider_notes:
                     st.markdown("**Provider breakdown:**")
@@ -301,6 +373,10 @@ with tab_tr:
                     for prov, path in res.saved_files:
                         st.markdown(f"- `{path.name}` *(via {prov})*")
 
+                if res.unavailable_upstream:
+                    unav_str = ", ".join(f"Q{q} {yr}" for yr, q in res.unavailable_upstream)
+                    st.caption(f"Unavailable upstream (e.g. pre-IPO / no call recorded — skipped to save quota): {unav_str}")
+
                 if res.missing_quarters:
                     missing_str = ", ".join(f"Q{q} {yr}" for yr, q in res.missing_quarters)
                     st.warning(f"Not yet available or outside free quota: {missing_str}")
@@ -309,39 +385,337 @@ with tab_tr:
 
 
 # ============================================================================
-# TAB 3: PORTFOLIO BATCH MODE (BUILT FOR ~10-STOCK PORTFOLIOS)
+# TAB 3: FUNDAMENTALS, PEERS & DCF VALUATION (100% FREE VIA DEFEATBETA)
+# ============================================================================
+with tab_fund:
+    st.subheader("Fundamentals Brief, Peers & DCF Valuation (Free — DefeatBeta)")
+    st.caption(
+        "Generates deterministic, currency-labelled `CompanyBrief.md`, `Peers.md`, "
+        "`Valuation/DCF_Summary.md`, and an editable Excel DCF workbook (`<TICKER>_DCF.xlsx`) "
+        "— ready for the DeepSeek AI Analyst tab."
+    )
+
+    f1, f2, f3, f4 = st.columns([2, 1, 1, 1])
+    with f1:
+        fund_ticker = st.text_input(
+            "Stock Ticker",
+            value=st.session_state.get("sec_ticker", ""),
+            placeholder="e.g. AAPL, YB, HUIZ, JFIN, UPST",
+            key="fund_ticker",
+        ).strip().upper()
+    with f2:
+        gen_brief = st.checkbox("Company Brief", value=True)
+    with f3:
+        gen_peers = st.checkbox("Peers Comparison", value=True)
+    with f4:
+        gen_dcf = st.checkbox("DCF + Excel", value=True)
+
+    if st.button("Generate Fundamentals & Valuation Pack", type="primary"):
+        if not fund_ticker:
+            st.warning("Please enter a stock ticker first.")
+        elif not (gen_brief or gen_peers or gen_dcf):
+            st.warning("Select at least one report to generate.")
+        else:
+            try:
+                clean_t = sanitize_ticker(fund_ticker)
+                with st.status(f"Building DefeatBeta intelligence pack for {clean_t}...", expanded=True) as status:
+                    t_obj = create_quiet_ticker(clean_t)
+                    brief_res = None
+                    peers_path = None
+                    val_res = None
+
+                    if gen_brief:
+                        brief_res = generate_company_brief(
+                            clean_t, ticker_obj=t_obj, on_status=lambda m: status.write(m)
+                        )
+                    if gen_peers:
+                        peers_path = generate_peers_report(
+                            clean_t, ticker_obj=t_obj, on_status=lambda m: status.write(m)
+                        )
+                    if gen_dcf:
+                        val_res = generate_valuation_bundle(
+                            clean_t, ticker_obj=t_obj, generate_excel=True, on_status=lambda m: status.write(m)
+                        )
+                    status.update(label=f"Intelligence pack ready for {clean_t}", state="complete")
+
+                if brief_res:
+                    st.success(
+                        f"Saved `CompanyBrief.md` (Reporting Currency: `{brief_res.currency}` | "
+                        f"Next/Last Earnings: `{brief_res.next_earnings_date}`)"
+                    )
+                    with st.expander("📄 Preview CompanyBrief.md", expanded=True):
+                        st.markdown(brief_res.path.read_text(encoding="utf-8"))
+
+                if peers_path:
+                    with st.expander("⚖️ Preview Peers.md", expanded=False):
+                        st.markdown(peers_path.read_text(encoding="utf-8"))
+
+                if val_res:
+                    if val_res.warnings:
+                        for w in val_res.warnings:
+                            st.warning(w)
+                    if val_res.excel_path and val_res.excel_path.exists():
+                        st.download_button(
+                            f"⬇️ Download Editable DCF Excel ({val_res.excel_path.name})",
+                            data=val_res.excel_path.read_bytes(),
+                            file_name=val_res.excel_path.name,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
+                    with st.expander("💰 Preview DCF_Summary.md", expanded=True):
+                        st.markdown(val_res.summary_md_path.read_text(encoding="utf-8"))
+
+            except Exception as exc:
+                st.error(f"Failed to generate fundamentals pack: {exc}")
+
+
+# ============================================================================
+# TAB 4: DEEPSEEK AI ANALYST (1M CONTEXT + CACHED GROUNDED RESEARCH)
+# ============================================================================
+with tab_ai:
+    st.subheader("🧠 DeepSeek AI Equity Analyst")
+    st.caption(
+        "Grounds DeepSeek (`deepseek-flash` or `deepseek-v4-pro`, 1M context) strictly in your "
+        "local dossier (`CompanyBrief.md`, `DCF_Summary.md`, `Peers.md`, transcripts, SEC filings)."
+    )
+
+    deepseek_key = api_keys.get("deepseek", "").strip()
+    if not deepseek_key:
+        st.warning(
+            "DeepSeek API key not found yet. Add it in the sidebar under **🔑 Add / Update API Keys** "
+            "(or add `deepseek API KEY: sk-...` to your local gitignored `Secrets.txt`)."
+        )
+
+    available_tickers = (
+        sorted([p.name for p in DEFAULT_DATA_ROOT.iterdir() if p.is_dir()])
+        if DEFAULT_DATA_ROOT.exists()
+        else []
+    )
+
+    if not available_tickers:
+        st.info(
+            "No local ticker folders found in `data/` yet. Generate a Company Brief / DCF or download "
+            "transcripts & SEC filings first."
+        )
+    else:
+        a1, a2 = st.columns([1, 2])
+        with a1:
+            ai_ticker = st.selectbox("Select Ticker Dossier", available_tickers, key="ai_ticker")
+        with a2:
+            ai_model = st.selectbox(
+                "DeepSeek Model",
+                options=list(DEEPSEEK_MODELS.keys()),
+                format_func=lambda m: DEEPSEEK_MODELS[m]["label"],
+                index=0,
+                key="ai_model",
+            )
+
+        dossier_files = list_dossier_files(ai_ticker)
+        if not dossier_files:
+            st.warning(f"No Markdown files found in `data/{ai_ticker}/` yet.")
+        else:
+            # Smart default selection: summaries + valuation + peers + up to 4 most recent transcripts
+            default_selected = []
+            tr_count = 0
+            for df in dossier_files:
+                if df.category in ("Summary", "Valuation", "Peers"):
+                    default_selected.append(df.rel_label)
+                elif df.category == "Transcript" and tr_count < 4:
+                    default_selected.append(df.rel_label)
+                    tr_count += 1
+            if not default_selected:
+                default_selected = [dossier_files[0].rel_label]
+
+            file_map = {df.rel_label: df for df in dossier_files}
+            chosen_labels = st.multiselect(
+                "Attach Local Files to DeepSeek Context (1M-token window)",
+                options=list(file_map.keys()),
+                default=default_selected,
+                help="Attaching CompanyBrief.md + DCF_Summary.md + 4 transcripts is ideal for DCF Reality Check & Promise Tracker.",
+            )
+            chosen_files = [file_map[lbl] for lbl in chosen_labels]
+
+            # Live token & cost preview before calling DeepSeek
+            total_bytes = sum(f.size_bytes for f in chosen_files)
+            est_in_tokens = max(1, total_bytes // 4) if chosen_files else 0
+            est_cost_miss = estimate_cost_usd(ai_model, est_in_tokens, 2000, cache_hit_tokens=0)
+            est_cost_hit = estimate_cost_usd(ai_model, est_in_tokens, 2000, cache_hit_tokens=est_in_tokens)
+            st.caption(
+                f"Attached: **{len(chosen_files)} file(s)** (~{est_in_tokens:,} input tokens) | "
+                f"Est. off-peak cost: **${est_cost_miss:.4f}** (1st run) / **${est_cost_hit:.4f}** (cached follow-up)"
+            )
+
+            st.divider()
+
+            # ── Part A: One-Click Institutional Workflows ────────────────────
+            st.markdown("### ⚡ One-Click DeepSeek Workflows")
+            wf_cols = st.columns(2)
+            wf_items = list(ANALYSIS_WORKFLOWS.items())
+            save_memo_opt = st.checkbox("Auto-save memo to `data/<TICKER>/Analysis/`", value=True)
+
+            triggered_wf = None
+            for idx, (wf_id, wf_meta) in enumerate(wf_items):
+                with wf_cols[idx % 2]:
+                    if st.button(wf_meta["label"], key=f"wf_{wf_id}", help=wf_meta["short_desc"]):
+                        triggered_wf = wf_id
+                    st.caption(wf_meta["short_desc"])
+
+            if triggered_wf:
+                if not deepseek_key:
+                    st.error("Please configure your DeepSeek API key in the sidebar first.")
+                elif not chosen_files:
+                    st.warning("Select at least one dossier file above.")
+                else:
+                    try:
+                        with st.spinner(
+                            f"Running {ANALYSIS_WORKFLOWS[triggered_wf]['label']} on {ai_ticker} via {ai_model}..."
+                        ):
+                            res = run_workflow_analysis(
+                                ticker=ai_ticker,
+                                workflow_id=triggered_wf,
+                                files=chosen_files,
+                                api_key=deepseek_key,
+                                model=ai_model,
+                                save_memo=save_memo_opt,
+                            )
+                        st.session_state["last_ai_result"] = res
+                    except Exception as exc:
+                        st.error(f"DeepSeek analysis failed: {exc}")
+
+            last_res = st.session_state.get("last_ai_result")
+            if last_res and last_res.ticker == ai_ticker:
+                st.success(
+                    f"Completed via `{last_res.model}` | "
+                    f"Tokens: {last_res.prompt_tokens:,} in ({last_res.cache_hit_tokens:,} cached) / "
+                    f"{last_res.completion_tokens:,} out | Est. cost: **${last_res.estimated_cost_usd:.4f}**"
+                )
+                if last_res.saved_path:
+                    st.caption(f"Saved memo: `{last_res.saved_path}`")
+                st.download_button(
+                    "⬇️ Download Analysis Memo (.md)",
+                    data=last_res.content,
+                    file_name=f"{last_res.ticker}_{last_res.workflow_id}.md",
+                    mime="text/markdown",
+                )
+                st.markdown(last_res.content)
+
+            st.divider()
+
+            # ── Part B: Interactive Grounded Dossier Chat ────────────────────
+            st.markdown(f"### 💬 Ask DeepSeek About `{ai_ticker}` (Prompt-Cached Chat)")
+            chat_key = f"deepseek_chat_{ai_ticker}"
+            if chat_key not in st.session_state:
+                st.session_state[chat_key] = []
+
+            if st.button("Clear chat history", key=f"clear_{chat_key}"):
+                st.session_state[chat_key] = []
+                st.rerun()
+
+            for msg in st.session_state[chat_key]:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+
+            user_q = st.chat_input(f"Ask anything about {ai_ticker} (grounded in attached files)...")
+            if user_q:
+                if not deepseek_key:
+                    st.error("Please configure your DeepSeek API key in the sidebar first.")
+                elif not chosen_files:
+                    st.warning("Attach at least one dossier file above.")
+                else:
+                    st.session_state[chat_key].append({"role": "user", "content": user_q})
+                    with st.chat_message("user"):
+                        st.markdown(user_q)
+
+                    dossier_text, _ = build_dossier_context(chosen_files)
+                    messages = [
+                        {
+                            "role": "system",
+                            "content": f"{SYSTEM_PROMPT_BASE}\n\n# DOSSIER FOR {ai_ticker}\n\n{dossier_text}",
+                        }
+                    ] + st.session_state[chat_key]
+
+                    with st.chat_message("assistant"):
+                        try:
+                            with st.spinner(f"DeepSeek ({ai_model}) analyzing {ai_ticker}..."):
+                                answer, usage = call_deepseek(
+                                    api_key=deepseek_key,
+                                    messages=messages,
+                                    model=ai_model,
+                                )
+                            st.markdown(answer)
+                            c_usd = estimate_cost_usd(
+                                ai_model,
+                                usage["prompt_tokens"],
+                                usage["completion_tokens"],
+                                usage["cache_hit_tokens"],
+                            )
+                            st.caption(
+                                f"Tokens: {usage['prompt_tokens']:,} in ({usage['cache_hit_tokens']:,} cached) / "
+                                f"{usage['completion_tokens']:,} out | Est. cost: ${c_usd:.4f}"
+                            )
+                            st.session_state[chat_key].append({"role": "assistant", "content": answer})
+                        except Exception as exc:
+                            st.error(f"DeepSeek chat error: {exc}")
+
+
+# ============================================================================
+# TAB 5: PORTFOLIO BATCH MODE + PREFLIGHT MATRIX (BUILT FOR ~10 STOCKS)
 # ============================================================================
 with tab_batch:
-    st.subheader("Portfolio Batch Downloader")
+    st.subheader("Portfolio Command Center & Batch Downloader")
     st.caption(
-        "Paste your watchlist (e.g. your 10 portfolio tickers). "
-        "Already-downloaded quarters are skipped automatically so you never waste free API credits."
+        "Paste your watchlist (e.g. your 10 portfolio tickers). Run **Preflight** first (free, 0 API credits) "
+        "to see upcoming earnings dates and transcript availability before downloading."
     )
 
     watchlist_raw = st.text_area(
         "Tickers (comma or newline separated)",
-        placeholder="AAPL, MSFT, NVDA, YB, HUIZ",
-        height=100,
+        placeholder="AAPL, MSFT, YB, HUIZ, JFIN, LU, UPST",
+        height=90,
     )
-    b1, b2, b3 = st.columns(3)
+    b1, b2, b3, b4 = st.columns(4)
     with b1:
         batch_years = st.number_input("Years of history", min_value=1, max_value=10, value=2, key="batch_years")
     with b2:
-        do_sec = st.checkbox("Download SEC Filings", value=True)
+        do_sec = st.checkbox("SEC Filings", value=True)
     with b3:
-        do_tr = st.checkbox("Download Transcripts", value=True)
+        do_tr = st.checkbox("Transcripts", value=True)
+    with b4:
+        do_fund = st.checkbox("Brief + Peers + DCF", value=True)
 
-    if st.button("Run Portfolio Batch", type="primary"):
-        raw_tokens = [
-            tok.strip().upper()
-            for tok in watchlist_raw.replace("\n", ",").split(",")
-            if tok.strip()
-        ]
-        tickers = list(dict.fromkeys(raw_tokens))
+    raw_tokens = [
+        tok.strip().upper()
+        for tok in watchlist_raw.replace("\n", ",").split(",")
+        if tok.strip()
+    ]
+    tickers = list(dict.fromkeys(raw_tokens))
+
+    btn_col1, btn_col2 = st.columns([1, 1])
+    with btn_col1:
+        preflight_btn = st.button("🔎 Run Free Preflight (Calendar + Coverage Matrix)")
+    with btn_col2:
+        batch_btn = st.button("🚀 Run Portfolio Batch", type="primary")
+
+    if preflight_btn:
         if not tickers:
             st.warning("Enter at least one ticker.")
-        elif not do_sec and not do_tr:
-            st.warning("Select SEC Filings, Transcripts, or both.")
+        else:
+            try:
+                with st.spinner("Querying DefeatBeta parallel catalog & earnings calendar (free)..."):
+                    cal_rows, matrix_rows = build_portfolio_preflight(tickers, num_years=int(batch_years))
+                if cal_rows:
+                    st.markdown("#### 📅 Portfolio Readiness & Earnings Calendar")
+                    st.dataframe(cal_rows, hide_index=True)
+                if matrix_rows:
+                    st.markdown("#### 🗂️ Transcript Coverage Matrix (Before Spending API Quota)")
+                    st.dataframe(matrix_rows, hide_index=True)
+            except Exception as exc:
+                st.error(f"Preflight failed: {exc}")
+
+    if batch_btn:
+        if not tickers:
+            st.warning("Enter at least one ticker.")
+        elif not (do_sec or do_tr or do_fund):
+            st.warning("Select at least one action (SEC, Transcripts, or Fundamentals).")
         else:
             progress = st.progress(0.0)
             for idx, tk in enumerate(tickers):
@@ -353,57 +727,100 @@ with tab_batch:
 
                 with st.status(f"[{idx+1}/{len(tickers)}] Processing {clean_tk}...", expanded=False) as st_box:
                     if do_sec:
-                        sec_res = download_and_convert_sec_filings(
-                            ticker=clean_tk,
-                            form_codes=DEFAULT_FORM_CODES,
-                            num_years=int(batch_years),
-                            on_status=lambda m: st_box.write(m),
-                        )
-                        st_box.write(f"SEC: {len(sec_res.converted_files)} Markdown files saved.")
+                        try:
+                            sec_res = download_and_convert_sec_filings(
+                                ticker=clean_tk,
+                                form_codes=DEFAULT_FORM_CODES,
+                                num_years=int(batch_years),
+                                on_status=lambda m: st_box.write(m),
+                            )
+                            st_box.write(
+                                f"SEC: {sec_res.submissions_found} submission(s), "
+                                f"{len(sec_res.converted_files)} Markdown files saved."
+                            )
+                        except Exception as exc:
+                            st_box.error(f"SEC error for {clean_tk}: {exc}")
                     if do_tr:
-                        tr_res = download_transcripts(
-                            ticker=clean_tk,
-                            num_years=int(batch_years),
-                            providers=enabled_providers,
-                            api_keys=api_keys,
-                            quota_manager=quota,
-                            on_log=lambda m: st_box.write(m),
-                        )
-                        st_box.write(
-                            f"Transcripts: {len(tr_res.saved_files)} new, "
-                            f"{len(tr_res.cached_quarters)} cached, "
-                            f"{len(tr_res.missing_quarters)} missing."
-                        )
+                        try:
+                            tr_res = download_transcripts(
+                                ticker=clean_tk,
+                                num_years=int(batch_years),
+                                providers=enabled_providers,
+                                api_keys=api_keys,
+                                quota_manager=quota,
+                                on_log=lambda m: st_box.write(m),
+                            )
+                            st_box.write(
+                                f"Transcripts: {len(tr_res.saved_files)} new, "
+                                f"{len(tr_res.cached_quarters)} cached, "
+                                f"{len(tr_res.unavailable_upstream)} unavailable upstream, "
+                                f"{len(tr_res.missing_quarters)} missing."
+                            )
+                        except Exception as exc:
+                            st_box.error(f"Transcript error for {clean_tk}: {exc}")
+                    if do_fund:
+                        try:
+                            t_obj = create_quiet_ticker(clean_tk)
+                            generate_company_brief(clean_tk, ticker_obj=t_obj, on_status=lambda m: st_box.write(m))
+                            generate_peers_report(clean_tk, ticker_obj=t_obj, on_status=lambda m: st_box.write(m))
+                            generate_valuation_bundle(
+                                clean_tk, ticker_obj=t_obj, generate_excel=True, on_status=lambda m: st_box.write(m)
+                            )
+                            st_box.write("Fundamentals: CompanyBrief.md, Peers.md & Valuation/ saved.")
+                        except Exception as exc:
+                            st_box.error(f"Fundamentals error for {clean_tk}: {exc}")
                     st_box.update(label=f"[{idx+1}/{len(tickers)}] {clean_tk} done", state="complete")
                 progress.progress((idx + 1) / len(tickers))
             st.success(f"Batch complete for {len(tickers)} ticker(s)!")
 
 
 # ============================================================================
-# TAB 4: BROWSE DOWNLOADED MARKDOWN FILES
+# TAB 6: BROWSE DOWNLOADED MARKDOWN & AI MEMO FILES
 # ============================================================================
 with tab_browse:
-    st.subheader("Browse Downloaded Markdown Files")
+    st.subheader("Browse Local Research Dossier")
     if not DEFAULT_DATA_ROOT.exists():
-        st.info("No data downloaded yet. Use the SEC Filings or Transcripts tab to get started.")
+        st.info("No data downloaded yet. Use the tabs above to build your first ticker dossier.")
     else:
         ticker_dirs = sorted([p for p in DEFAULT_DATA_ROOT.iterdir() if p.is_dir()])
         if not ticker_dirs:
             st.info("No ticker folders found in `data/`.")
         else:
-            chosen_ticker = st.selectbox("Select Ticker", [p.name for p in ticker_dirs])
+            chosen_ticker = st.selectbox("Select Ticker", [p.name for p in ticker_dirs], key="browse_ticker")
             t_root = DEFAULT_DATA_ROOT / chosen_ticker
-            md_files: List[Path] = sorted(
-                list((t_root / "EarningsTranscripts").glob("*.md"))
-                + list((t_root / "DataFromDataMule_markdown").glob("*.md")),
-                key=lambda p: (p.parent.name, p.name),
-                reverse=True,
-            )
+
+            md_files: List[Path] = []
+            for top_name in ("CompanyBrief.md", "Peers.md", "Coverage.md"):
+                tp = t_root / top_name
+                if tp.exists():
+                    md_files.append(tp)
+            for sub in ("Analysis", "Valuation", "EarningsTranscripts", "DataFromDataMule_markdown"):
+                sub_dir = t_root / sub
+                if sub_dir.exists():
+                    md_files.extend(sorted(sub_dir.glob("*.md"), reverse=True))
+
+            # Offer Excel DCF download if present
+            xlsx_path = t_root / "Valuation" / f"{chosen_ticker}_DCF.xlsx"
+            if xlsx_path.exists():
+                st.download_button(
+                    f"📊 Download DCF Excel ({xlsx_path.name})",
+                    data=xlsx_path.read_bytes(),
+                    file_name=xlsx_path.name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
             if not md_files:
                 st.info(f"No Markdown files found for {chosen_ticker}.")
             else:
-                labels = [f"{p.parent.name}/{p.name} ({p.stat().st_size // 1024} KB)" for p in md_files]
-                selected_idx = st.selectbox("Select Document", range(len(labels)), format_func=lambda i: labels[i])
+                labels = [
+                    f"{p.relative_to(t_root).as_posix()} ({max(1, p.stat().st_size // 1024)} KB)"
+                    for p in md_files
+                ]
+                selected_idx = st.selectbox(
+                    "Select Document",
+                    range(len(labels)),
+                    format_func=lambda i: labels[i],
+                )
                 doc_path = md_files[selected_idx]
                 content = doc_path.read_text(encoding="utf-8", errors="replace")
                 st.download_button(
@@ -412,7 +829,7 @@ with tab_browse:
                     file_name=doc_path.name,
                     mime="text/markdown",
                 )
-                preview_limit = 25000
+                preview_limit = 30000
                 if len(content) > preview_limit:
                     st.caption(f"Showing first {preview_limit:,} of {len(content):,} characters.")
                     st.markdown(content[:preview_limit] + "\n\n*... (truncated for preview)*")

@@ -23,6 +23,7 @@ QUOTA_FILE = REPO_ROOT / ".quota_state.json"
 PROVIDER_SPECS: Dict[str, Dict[str, Any]] = {
     "defeatbeta": {
         "label": "DefeatBeta (Hugging Face)",
+        "category": "data",
         "requires_key": False,
         "env_var": None,
         "limit_desc": "Unlimited (open dataset, no API key)",
@@ -30,6 +31,7 @@ PROVIDER_SPECS: Dict[str, Dict[str, Any]] = {
     },
     "roic": {
         "label": "ROIC.ai API v3",
+        "category": "data",
         "requires_key": True,
         "env_var": "ROIC_API_KEY",
         "limit_desc": "Free: 5 req/min, latest 2 calls/company",
@@ -39,6 +41,7 @@ PROVIDER_SPECS: Dict[str, Dict[str, Any]] = {
     },
     "alphavantage": {
         "label": "Alpha Vantage",
+        "category": "data",
         "requires_key": True,
         "env_var": "ALPHAVANTAGE_API_KEY",
         "limit_desc": "Free: 25 req/day (~1 req/sec), full history since 2010Q1",
@@ -48,15 +51,26 @@ PROVIDER_SPECS: Dict[str, Dict[str, Any]] = {
     },
     "firecrawl": {
         "label": "Firecrawl (Web + Alexandria)",
+        "category": "data",
         "requires_key": True,
         "env_var": "FIRECRAWL_API_KEY",
         "limit_desc": "Free: 1,000 credits/month (fallback only)",
         "monthly_credit_limit": 1000,
         "docs_url": "https://docs.firecrawl.dev/features/alexandria",
     },
+    "deepseek": {
+        "label": "DeepSeek AI",
+        "category": "llm",
+        "requires_key": True,
+        "env_var": "DEEPSEEK_API_KEY",
+        "base_url": "https://api.deepseek.com",
+        "limit_desc": "Pay-as-you-go: 1M context, ~$0.15/1M input ($0.003/1M cached) off-peak",
+        "docs_url": "https://api-docs.deepseek.com/quick_start/pricing",
+    },
 }
 
 DEFAULT_PROVIDER_ORDER = ["defeatbeta", "roic", "alphavantage", "firecrawl"]
+API_KEY_PROVIDERS = ("roic", "alphavantage", "firecrawl", "deepseek")
 
 
 def mask_key(key: Optional[str]) -> str:
@@ -76,9 +90,10 @@ def parse_secrets_txt(path: Path) -> Dict[str, str]:
     found: Dict[str, str] = {}
     text = path.read_text(encoding="utf-8", errors="ignore")
     patterns = {
-        "roic": re.compile(r"roic(?:\.ai)?[^\n:]*:\s*(\S+)", re.IGNORECASE),
-        "alphavantage": re.compile(r"alpha\s*vantage(?:\.co)?[^\n:]*:\s*(\S+)", re.IGNORECASE),
-        "firecrawl": re.compile(r"firecrawl(?:\.dev)?[^\n:]*:\s*(\S+)", re.IGNORECASE),
+        "roic": re.compile(r"roic(?:\.ai)?[^\n:=]*[:=]\s*(\S+)", re.IGNORECASE),
+        "alphavantage": re.compile(r"alpha\s*vantage(?:\.co)?[^\n:=]*[:=]\s*(\S+)", re.IGNORECASE),
+        "firecrawl": re.compile(r"firecrawl(?:\.dev)?[^\n:=]*[:=]\s*(\S+)", re.IGNORECASE),
+        "deepseek": re.compile(r"deepseek(?:\.com|\.ai)?[^\n:=]*[:=]\s*(\S+)", re.IGNORECASE),
     }
     for provider, pat in patterns.items():
         m = pat.search(text)
