@@ -59,6 +59,15 @@ from transcript_providers import (
     save_transcript_record,
     scan_existing_quarters,
 )
+from valuation_math import (
+    VALUATION_TOOLS,
+    compute_four_state_summary,
+    compute_irr_and_returns,
+    compute_operating_valuation_model,
+    compute_pb_grid,
+    execute_valuation_tool,
+    solve_irr,
+)
 
 
 # ── Minimal pandas-compatible DataFrame double (no heavy dep needed in unit tests) ──
@@ -985,6 +994,261 @@ def test_ai_peer_discovery_and_named_peers_report(tmp_path: Path):
     assert "| `LMND` | Lemonade Inc. | `2026-11-20` | USD 2.00B | USD 1.50B | neg NOPAT |" in txt
     # Median EV/NOPAT uses only WDH (5.00x); median P/E uses WDH & HUIZ (7.00x); median P/B uses 0.50, 0.90, 3.20 (0.90x)
     assert "| **Peer Median** | *(positive multiples)* | — | — | — | **5.00x** | **7.00x** | **0.90x** | **1.10x** |" in txt
+
+
+# ============================================================================
+# 7. valuation_math.py & DeepSeek Tool-Calling + Auto-Continuation
+# ============================================================================
+
+def test_valuation_math_irr_operating_model_pb_grid_and_four_state():
+    # 1. Exact IRR + V6 Section 4.4 zero-recovery -100% rule
+    assert solve_irr([-10.0, 0.0, 0.0, 0.0]) == -1.0
+    zero_ret = compute_irr_and_returns([-10.0, 0.0, 0.0])
+    assert zero_ret["moic"] == 0.0
+    assert zero_ret["total_return_pct"] == -100.0
+    assert zero_ret["irr_pct"] == -100.0
+    assert zero_ret["ten_k_proceeds_usd"] == 0.0
+
+    # Zero-dividend 5Y doubling -> 2^(1/5) - 1 = 14.8698%
+    no_div = compute_irr_and_returns([-10.0, 0.0, 0.0, 0.0, 0.0, 20.0])
+    assert no_div["moic"] == 2.0
+    assert abs(no_div["irr_pct"] - 14.87) < 0.02
+
+    # Interim dividends raise IRR strictly above (MOIC^(1/5)-1)
+    with_div = compute_irr_and_returns([-10.0, 1.0, 1.0, 1.0, 1.0, 16.0])
+    assert with_div["moic"] == 2.0
+    assert with_div["irr_pct"] > no_div["irr_pct"]
+
+    # 2. Operating 5Y model + 1-pass buyback + exact 9-cell 3x3 grid + break-even CAGR + trailing check
+    op = compute_operating_valuation_model(
+        entry_price_usd=10.0,
+        starting_diluted_shares_m=50.0,
+        starting_excess_cash_m=100.0,
+        year0_revenue_m=400.0,
+        tax_rate=0.20,
+        sales_to_capital=5.0,
+        cash_haircut=0.50,
+        ronic=0.25,
+        required_return_r=0.11,
+        scenarios={
+            "bear": {
+                "revenue_growth_y1_to_y5": [0.02, 0.02, 0.02, 0.02, 0.02],
+                "ebit_margins_y1_to_y5": [0.14, 0.14, 0.14, 0.14, 0.14],
+                "terminal_g": 0.02,
+                "exit_multiple": 7.0,
+                "annual_buyback_usd_m": 0.0,
+                "dividend_payout_pct_of_nopat": 0.10,
+            },
+            "base": {
+                "revenue_growth_y1_to_y5": [0.10, 0.09, 0.08, 0.07, 0.06],
+                "ebit_margins_y1_to_y5": [0.18, 0.18, 0.18, 0.18, 0.18],
+                "terminal_g": 0.03,
+                "exit_multiple": 10.0,
+                "annual_buyback_usd_m": 15.0,
+                "dividend_payout_pct_of_nopat": 0.15,
+            },
+            "bull": {
+                "revenue_growth_y1_to_y5": [0.16, 0.15, 0.14, 0.12, 0.10],
+                "ebit_margins_y1_to_y5": [0.22, 0.22, 0.22, 0.22, 0.22],
+                "terminal_g": 0.035,
+                "exit_multiple": 13.0,
+                "annual_buyback_usd_m": 25.0,
+                "dividend_payout_pct_of_nopat": 0.15,
+            },
+        },
+    )
+    # Center cell (base row, base multiple 10.00x) MUST reconcile identically to Base scenario IRR
+    assert op["grid_3x3_irr_pct"]["base"]["base_mult_10.00x"] == op["scenarios"]["base"]["irr_pct"]
+    assert op["grid_3x3_terminal_price_usd"]["base"]["base_mult_10.00x"] == op["scenarios"]["base"]["terminal_price_usd"]
+    assert all(len(op["grid_3x3_irr_pct"][r]) == 3 for r in ("bear", "base", "bull"))
+    # Buybacks retired shares strictly using 1-pass midpoint price
+    base_s = op["scenarios"]["base"]
+    expected_mid = 0.5 * (10.0 + base_s["zero_buyback_tv_usd"])
+    assert abs(base_s["avg_buyback_price_usd"] - expected_mid) < 1e-3
+    assert base_s["year5_diluted_shares_m"] < 50.0
+    # Trailing Gordon formula check at r ± 200 bps
+    tf = op["trailing_formula_crosscheck"]
+    assert tf["r_minus_200bps"]["implied_ev_nopat"] > tf["r_base"]["implied_ev_nopat"] > tf["r_plus_200bps"]["implied_ev_nopat"]
+
+    # 3. Financial / Broker P/B x ROE 9-cell grid
+    pb = compute_pb_grid(
+        entry_price_usd=3.67,
+        starting_book_equity_m=700.0,
+        diluted_shares_m=183.06,
+        required_return_r=0.12,
+        scenarios={
+            "bear": {"roe": 0.09, "payout_ratio": 0.0, "terminal_g": 0.02, "exit_pb": 0.60},
+            "base": {"roe": 0.125, "payout_ratio": 0.0, "terminal_g": 0.03, "exit_pb": 1.10},
+            "bull": {"roe": 0.16, "payout_ratio": 0.0, "terminal_g": 0.035, "exit_pb": 1.35},
+        },
+    )
+    assert pb["grid_3x3_irr_pct"]["base"]["base_pb_1.100x"] == pb["scenarios"]["base"]["irr_pct"]
+    assert pb["grid_3x3_irr_pct"]["base"]["bear_pb_0.600x"] < pb["grid_3x3_irr_pct"]["bull"]["bear_pb_0.600x"]
+    assert pb["justified_pb_sensitivity"]["r_base"]["base"] == round((0.125 - 0.03) / (0.12 - 0.03), 3)
+
+    # 4. Phase 4-5 Four-State Summary (dated Expected IRR, +/-10 pp reallocation, asymmetry)
+    four = compute_four_state_summary(
+        entry_price_usd=10.0,
+        catastrophe={"probability_pct": 10, "event_year": 2, "recovery_per_share_usd": 2.0, "prior_net_dividends_usd": [0.2, 0.0]},
+        bear={"probability_pct": 20, "terminal_price_usd": 12.0, "net_dividends_y1_to_y5_usd": [0.2, 0.2, 0.2, 0.2, 0.2]},
+        base={"probability_pct": 50, "terminal_price_usd": 24.0, "net_dividends_y1_to_y5_usd": [0.4, 0.4, 0.4, 0.4, 0.4]},
+        bull={"probability_pct": 20, "terminal_price_usd": 40.0, "net_dividends_y1_to_y5_usd": [0.6, 0.6, 0.6, 0.6, 0.6]},
+    )
+    # Weighted dated Expected IRR must NOT equal naive weighted sum of individual scenario IRRs
+    naive_irr = (
+        0.10 * four["scenarios"]["catastrophe"]["irr_pct"]
+        + 0.20 * four["scenarios"]["bear"]["irr_pct"]
+        + 0.50 * four["scenarios"]["base"]["irr_pct"]
+        + 0.20 * four["scenarios"]["bull"]["irr_pct"]
+    )
+    assert abs(four["expected"]["expected_irr_pct"] - naive_irr) > 1.0
+    # +/-10 pp sensitivity keeps Bull=20%, reallocates proportionally between Bear (20/30) and Cat (10/30)
+    assert four["base_prob_minus10_pp"]["probabilities_pct"]["bull"] == 20.0
+    assert four["base_prob_minus10_pp"]["probabilities_pct"]["base"] == 40.0
+    assert abs(sum(four["base_prob_minus10_pp"]["probabilities_pct"].values()) - 100.0) < 0.02
+    assert four["base_prob_plus10_pp"]["probabilities_pct"]["base"] == 60.0
+    assert four["base_prob_minus10_pp"]["expected_irr_pct"] < four["expected"]["expected_irr_pct"] < four["base_prob_plus10_pp"]["expected_irr_pct"]
+    assert four["distribution"]["prob_capital_loss_pct"] == 10.0
+    assert four["distribution"]["median_outcome"] == "Base"
+    assert four["distribution"]["fifth_percentile_outcome"] == "Catastrophe"
+    assert isinstance(four["distribution"]["asymmetry_ratio"], float) and four["distribution"]["asymmetry_ratio"] > 10.0
+
+    # Dispatcher executes JSON string and handles unknown tool gracefully
+    out_json = json.loads(execute_valuation_tool("compute_irr_and_returns", json.dumps({"cash_flows": [-10, 0, 0, 0, 0, 20]})))
+    assert out_json["moic"] == 2.0
+    err_json = json.loads(execute_valuation_tool("nonexistent_tool", "{}"))
+    assert "error" in err_json
+
+
+def test_deepseek_sse_tool_calling_and_seamless_auto_continuation():
+    # 1. SSE streaming tool call: round 1 streams chunked tool_calls + reasoning_content,
+    #    round 2 receives tool result and returns final answer.
+    sse_round1 = [
+        'data: {"choices":[{"delta":{"reasoning_content":"Let me run Python IRR."},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"compute_irr_and_returns","arguments":"{\\"cash_flows\\":"}}]},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"[-10, 0, 0, 0, 0, 20]}"}}]},"finish_reason":"tool_calls"}]}',
+        'data: {"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":80,"prompt_cache_hit_tokens":0}}',
+        "data: [DONE]",
+    ]
+    sse_round2 = [
+        'data: {"choices":[{"delta":{"reasoning_content":"Got exact 14.87% IRR."},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"content":"Exact IRR is 14.87% (2.00x MOIC)."},"finish_reason":"stop"}]}',
+        'data: {"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":40,"prompt_cache_hit_tokens":1000}}',
+        "data: [DONE]",
+    ]
+    r1 = MagicMock(status_code=200)
+    r1.iter_lines.return_value = iter(sse_round1)
+    r2 = MagicMock(status_code=200)
+    r2.iter_lines.return_value = iter(sse_round2)
+
+    stream_session = MagicMock()
+    stream_session.post.side_effect = [r1, r2]
+    progress_events = []
+    stats = {}
+
+    content, reasoning, finish, usage = call_deepseek_full(
+        api_key="sk-test",
+        messages=[{"role": "user", "content": "Compute IRR for -10 to 20 in 5y"}],
+        max_tokens=65536,
+        stream=True,
+        on_progress=lambda ph, rc, cc: progress_events.append((ph, rc, cc)),
+        tools=VALUATION_TOOLS,
+        stats_out=stats,
+        session=stream_session,
+    )
+    assert content == "Exact IRR is 14.87% (2.00x MOIC)."
+    assert "Let me run Python IRR." in reasoning and "Got exact 14.87% IRR." in reasoning
+    assert finish == "stop"
+    assert stats == {"tool_calls_used": 1, "continuations_used": 0}
+    assert usage == {"prompt_tokens": 2200, "completion_tokens": 120, "cache_hit_tokens": 1000}
+    assert any(ev[0] == "tool:compute_irr_and_returns" for ev in progress_events)
+
+    # Verify round-2 payload preserved reasoning_content on assistant tool_calls msg & passed exact tool result
+    round2_msgs = stream_session.post.call_args_list[1].kwargs["json"]["messages"]
+    asst_tc_msg = round2_msgs[-2]
+    tool_res_msg = round2_msgs[-1]
+    assert asst_tc_msg["role"] == "assistant"
+    assert asst_tc_msg["reasoning_content"] == "Let me run Python IRR."
+    assert tool_res_msg["role"] == "tool" and tool_res_msg["tool_call_id"] == "call_1"
+    assert json.loads(tool_res_msg["content"])["irr_pct"] == 14.87
+
+    # 2. Non-streaming tool call + auto_continue on finish_reason == "length"
+    m1 = MagicMock(status_code=200)
+    m1.json.return_value = {
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "reasoning_content": "Need IRR",
+                "content": "",
+                "tool_calls": [{
+                    "id": "tc_a",
+                    "type": "function",
+                    "function": {"name": "compute_irr_and_returns", "arguments": '{"cash_flows": [-10, 0, 0]}'},
+                }],
+            },
+        }],
+        "usage": {"prompt_tokens": 500, "completion_tokens": 30},
+    }
+    m2 = MagicMock(status_code=200)
+    m2.json.return_value = {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {"reasoning_content": "Drafting", "content": "## Phase 1\nPartial report"},
+        }],
+        "usage": {"prompt_tokens": 600, "completion_tokens": 400, "prompt_cache_hit_tokens": 500},
+    }
+    m3 = MagicMock(status_code=200)
+    m3.json.return_value = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"content": "## Phase 6\nAll 17 PASS."},
+        }],
+        "usage": {"prompt_tokens": 1050, "completion_tokens": 100, "prompt_cache_hit_tokens": 950},
+    }
+    cont_session = MagicMock()
+    cont_session.post.side_effect = [m1, m2, m3]
+    cont_stats = {}
+
+    c_txt, _c_rsn, c_fin, c_usage = call_deepseek_full(
+        api_key="sk-test",
+        messages=[{"role": "user", "content": "Run full valuation"}],
+        max_tokens=65536,
+        stream=False,
+        tools=VALUATION_TOOLS,
+        auto_continue=True,
+        stats_out=cont_stats,
+        session=cont_session,
+    )
+    assert "## Phase 1\nPartial report" in c_txt
+    assert "## Phase 6\nAll 17 PASS." in c_txt
+    assert c_fin == "stop"
+    assert cont_stats == {"tool_calls_used": 1, "continuations_used": 1}
+    assert c_usage["cache_hit_tokens"] == 1450
+    # Continuation turn MUST strip prior reasoning_content and omit tools
+    cont_payload = cont_session.post.call_args_list[2].kwargs["json"]
+    assert "tools" not in cont_payload
+    assert all("reasoning_content" not in msg for msg in cont_payload["messages"])
+
+    # 3. Graceful HTTP 400 fallback if endpoint rejects tools
+    fb1 = MagicMock(status_code=400)
+    fb1.json.return_value = {"error": {"message": "tools parameter not supported"}}
+    fb2 = MagicMock(status_code=200)
+    fb2.json.return_value = {
+        "choices": [{"finish_reason": "stop", "message": {"content": "Fallback succeeded."}}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+    }
+    fb_session = MagicMock()
+    fb_session.post.side_effect = [fb1, fb2]
+    fb_txt, _, fb_fin, _ = call_deepseek_full(
+        api_key="sk-test",
+        messages=[{"role": "user", "content": "Hi"}],
+        tools=VALUATION_TOOLS,
+        session=fb_session,
+    )
+    assert fb_txt == "Fallback succeeded."
+    assert fb_fin == "stop"
+    assert "tools" not in fb_session.post.call_args_list[1].kwargs["json"]
+
 
 
 

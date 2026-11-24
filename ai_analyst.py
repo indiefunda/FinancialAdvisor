@@ -20,6 +20,7 @@ import requests
 
 from config_manager import PROVIDER_SPECS
 from sec_downloader import DEFAULT_DATA_ROOT, sanitize_ticker, strip_sec_metadata_header
+from valuation_math import VALUATION_TOOLS, execute_valuation_tool
 
 DEEPSEEK_API_URL = f"{PROVIDER_SPECS['deepseek']['base_url'].rstrip('/')}/chat/completions"
 _TRANSCRIPT_PERIOD_RE = re.compile(r"Q([1-4])\s+(\d{4})", re.IGNORECASE)
@@ -69,7 +70,12 @@ SYSTEM_PROMPT_VALUATION = (
     "do not invent a single expected terminal share price across scenarios with different realization dates. "
     "4) Tag every numerical input as `[Filing: Document, Period, Line Item]`, `[Market Data: Source, Date]`, "
     "or `[Assumption]`, or write `\"not provided\"` rather than inventing missing figures. "
-    "5) Begin immediately with the Executive Return Summary (Headline + Scenario Return Table showing MOIC, Total Return %, "
+    "5) USE THE PROVIDED PYTHON CALCULATOR TOOLS (`compute_operating_valuation_model` or `compute_pb_grid`, then "
+    "`compute_four_state_summary`, and `compute_irr_and_returns`) for ALL dated IRR solves, 1-pass buyback calculations, "
+    "9-cell 3x3 cross-grids, break-even growth solves, +/-10 pp probability sensitivities, and asymmetry ratios. "
+    "NEVER perform multi-step trial-and-error IRR iterations by hand inside your thoughts! Keep internal reasoning concise "
+    "and non-repetitive so the full 6-phase report completes cleanly well within the output budget. "
+    "6) Begin immediately with the Executive Return Summary (Headline + Scenario Return Table showing MOIC, Total Return %, "
     "Annualized IRR %, and $10,000 Cumulative Proceeds), complete Phases 1–6 including all 17 audit checks, and conclude "
     "at the VERY END of the response with the single-line `<!-- valuation-summary-json {...} -->` HTML comment using the exact keys "
     "specified in Phase 6 so every number reconciles with the audited tables. "
@@ -82,9 +88,10 @@ SYSTEM_PROMPT_VALUATION_CHAT = (
     "Continue discussing and refining the company's USD-based, CAPM/WACC-free 5-year intrinsic valuation "
     "grounded strictly in the attached dossier. "
     "NEVER use CAPM, Beta, or WACC, and do not introduce personal hurdle rates or portfolio position sizing. "
-    "Tag every numerical input (`[Filing: ...]`, `[Market Data: ...]`, `[Assumption]`), show math transparently, "
-    "and respond directly to the user's question without repeating the full 6-phase report or emitting a JSON summary tag "
-    "unless explicitly requested."
+    "Tag every numerical input (`[Filing: ...]`, `[Market Data: ...]`, `[Assumption]`), use the provided Python "
+    "calculator tools whenever recalculating IRRs, buybacks, 3x3 grids, or probability-weighted returns, show math "
+    "transparently, and respond directly to the user's question without repeating the full 6-phase report or emitting "
+    "a JSON summary tag unless explicitly requested."
 )
 
 _VALUATION_SUMMARY_RE = re.compile(
@@ -307,6 +314,8 @@ class AnalysisResult:
     content: str
     reasoning: str = ""
     finish_reason: str = ""
+    tool_calls_used: int = 0
+    continuations_used: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cache_hit_tokens: int = 0
@@ -480,41 +489,16 @@ def save_analysis_memo(
     return out_path
 
 
-def call_deepseek_full(
-    api_key: str,
-    messages: List[Dict[str, str]],
-    model: str = DEFAULT_MODEL,
-    temperature: float = 0.2,
-    max_tokens: int = 4096,
-    timeout: Any = (30, 600),
-    stream: bool = False,
-    on_progress: Optional[Callable[[str, int, int], None]] = None,
-    session: Optional[requests.Session] = None,
-) -> Tuple[str, str, str, Dict[str, int]]:
-    """Call DeepSeek's OpenAI-compatible chat completions endpoint.
-
-    Returns `(content, reasoning, finish_reason, usage)` and NEVER silently
-    substitutes raw internal `reasoning_content` for the final answer.
-    """
-    if not api_key or not api_key.strip():
-        raise ValueError("DeepSeek API key is not configured. Add it in the sidebar or Secrets.txt.")
-
-    http = session or requests.Session()
-    headers = {
-        "Authorization": f"Bearer {api_key.strip()}",
-        "Content-Type": "application/json",
-    }
-    payload: Dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-    }
-    if model == "deepseek-flash":
-        payload["temperature"] = temperature
-    if stream:
-        payload["stream"] = True
-        payload["stream_options"] = {"include_usage": True}
-
+def _single_deepseek_round(
+    *,
+    http: requests.Session,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    timeout: Any,
+    stream: bool,
+    on_progress: Optional[Callable[[str, int, int], None]],
+) -> Tuple[str, str, str, List[Dict[str, Any]], Dict[str, int]]:
+    """Execute one HTTP round against DeepSeek (streaming or non-streaming), parsing tool_calls cleanly."""
     resp = http.post(
         DEEPSEEK_API_URL,
         headers=headers,
@@ -541,6 +525,8 @@ def call_deepseek_full(
 
     content_parts: List[str] = []
     reasoning_parts: List[str] = []
+    tool_calls_by_idx: Dict[int, Dict[str, Any]] = {}
+    tool_calls_list: List[Dict[str, Any]] = []
     finish_reason = ""
     usage_raw: Dict[str, Any] = {}
 
@@ -580,12 +566,34 @@ def call_deepseek_full(
                     if cc:
                         content_parts.append(str(cc))
                         c_chars += len(str(cc))
+                    tcs = delta.get("tool_calls")
+                    if isinstance(tcs, list):
+                        for tc in tcs:
+                            if not isinstance(tc, dict):
+                                continue
+                            idx = int(tc.get("index", 0))
+                            entry = tool_calls_by_idx.setdefault(
+                                idx,
+                                {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                            )
+                            if tc.get("id"):
+                                entry["id"] = str(tc["id"])
+                            if tc.get("type"):
+                                entry["type"] = str(tc["type"])
+                            fn = tc.get("function")
+                            if isinstance(fn, dict):
+                                if fn.get("name"):
+                                    entry["function"]["name"] += str(fn["name"])
+                                if fn.get("arguments"):
+                                    entry["function"]["arguments"] += str(fn["arguments"])
                     if on_progress and (r_chars + c_chars - last_report) >= 250:
                         last_report = r_chars + c_chars
                         phase = "writing" if c_chars > 0 else "thinking"
                         on_progress(phase, r_chars, c_chars)
         content = "".join(content_parts).strip()
         reasoning = "".join(reasoning_parts).strip()
+        if tool_calls_by_idx:
+            tool_calls_list = [tool_calls_by_idx[i] for i in sorted(tool_calls_by_idx)]
     else:
         try:
             body = resp.json()
@@ -603,16 +611,10 @@ def call_deepseek_full(
         msg = c0.get("message", {}) if isinstance(c0.get("message"), dict) else {}
         content = str(msg.get("content") or "").strip()
         reasoning = str(msg.get("reasoning_content") or "").strip()
+        raw_tcs = msg.get("tool_calls")
+        if isinstance(raw_tcs, list):
+            tool_calls_list = [tc for tc in raw_tcs if isinstance(tc, dict)]
         usage_raw = body.get("usage", {}) if isinstance(body, dict) else {}
-
-    if not content:
-        if finish_reason == "length" and reasoning:
-            raise RuntimeError(
-                f"DeepSeek exhausted the max_tokens limit ({max_tokens:,}) during internal reasoning "
-                f"({len(reasoning):,} chars of thoughts) before writing the final valuation. "
-                "Try attaching fewer raw SEC filings (rely on ValuationPack.md + CompanyBrief.md) or re-running."
-            )
-        raise RuntimeError("DeepSeek API returned an empty final answer.")
 
     prompt_details = usage_raw.get("prompt_tokens_details") or {}
     cache_hit = int(
@@ -625,7 +627,186 @@ def call_deepseek_full(
         "completion_tokens": int(usage_raw.get("completion_tokens") or 0),
         "cache_hit_tokens": cache_hit,
     }
-    return content, reasoning, finish_reason, usage
+    return content, reasoning, finish_reason, tool_calls_list, usage
+
+
+def call_deepseek_full(
+    api_key: str,
+    messages: List[Dict[str, Any]],
+    model: str = DEFAULT_MODEL,
+    temperature: float = 0.2,
+    max_tokens: int = 4096,
+    timeout: Any = (30, 600),
+    stream: bool = False,
+    on_progress: Optional[Callable[[str, int, int], None]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_executor: Optional[Callable[[str, str], str]] = None,
+    max_tool_rounds: int = 6,
+    auto_continue: bool = False,
+    stats_out: Optional[Dict[str, int]] = None,
+    session: Optional[requests.Session] = None,
+) -> Tuple[str, str, str, Dict[str, int]]:
+    """Call DeepSeek's OpenAI-compatible chat completions endpoint with optional Python tool-calling
+    and seamless auto-continuation on `finish_reason == "length"`.
+
+    Returns `(content, reasoning, finish_reason, usage)` and NEVER silently
+    substitutes raw internal `reasoning_content` for the final answer.
+    """
+    if not api_key or not api_key.strip():
+        raise ValueError("DeepSeek API key is not configured. Add it in the sidebar or Secrets.txt.")
+
+    http = session or requests.Session()
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json",
+    }
+
+    working_msgs: List[Dict[str, Any]] = [dict(m) for m in messages]
+    active_tools = list(tools) if tools else None
+    executor = tool_executor or execute_valuation_tool
+
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "cache_hit_tokens": 0}
+    all_reasoning: List[str] = []
+    tool_calls_used = 0
+    continuations_used = 0
+
+    def _build_payload(msgs: List[Dict[str, Any]], include_tools: bool) -> Dict[str, Any]:
+        pl: Dict[str, Any] = {
+            "model": model,
+            "messages": msgs,
+            "max_tokens": max_tokens,
+        }
+        if model == "deepseek-flash":
+            pl["temperature"] = temperature
+        if stream:
+            pl["stream"] = True
+            pl["stream_options"] = {"include_usage": True}
+        if include_tools and active_tools:
+            pl["tools"] = active_tools
+            pl["tool_choice"] = "auto"
+        return pl
+
+    content = ""
+    finish_reason = ""
+
+    for round_idx in range(max(1, max_tool_rounds + 1)):
+        allow_tools = bool(active_tools and round_idx < max_tool_rounds)
+        payload = _build_payload(working_msgs, include_tools=allow_tools)
+        try:
+            r_content, r_reasoning, r_finish, r_tcs, r_usage = _single_deepseek_round(
+                http=http,
+                headers=headers,
+                payload=payload,
+                timeout=timeout,
+                stream=stream,
+                on_progress=on_progress,
+            )
+        except RuntimeError as exc:
+            # Graceful fallback if a DeepSeek endpoint rejects tools parameter
+            if allow_tools and "HTTP 400" in str(exc) and "tool" in str(exc).lower():
+                active_tools = None
+                payload = _build_payload(working_msgs, include_tools=False)
+                r_content, r_reasoning, r_finish, r_tcs, r_usage = _single_deepseek_round(
+                    http=http,
+                    headers=headers,
+                    payload=payload,
+                    timeout=timeout,
+                    stream=stream,
+                    on_progress=on_progress,
+                )
+            else:
+                raise
+
+        for k in total_usage:
+            total_usage[k] += r_usage[k]
+        if r_reasoning:
+            all_reasoning.append(r_reasoning)
+
+        if r_tcs and allow_tools:
+            # Preserve reasoning_content on the assistant tool_calls turn per DeepSeek reasoning API spec
+            asst_msg: Dict[str, Any] = {
+                "role": "assistant",
+                "content": r_content or "",
+                "tool_calls": r_tcs,
+            }
+            if r_reasoning:
+                asst_msg["reasoning_content"] = r_reasoning
+            working_msgs.append(asst_msg)
+
+            for tc in r_tcs:
+                fn_obj = tc.get("function") or {}
+                fn_name = str(fn_obj.get("name") or "")
+                fn_args = str(fn_obj.get("arguments") or "{}")
+                tc_id = str(tc.get("id") or f"call_{tool_calls_used + 1}")
+                tool_calls_used += 1
+                if on_progress:
+                    on_progress(f"tool:{fn_name}", sum(len(x) for x in all_reasoning), tool_calls_used)
+                tool_out = executor(fn_name, fn_args)
+                working_msgs.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": tool_out,
+                })
+            continue
+
+        content = r_content
+        finish_reason = r_finish
+        break
+
+    # Seamless auto-continuation when content was truncated mid-report (`finish_reason == "length"`)
+    if auto_continue and finish_reason == "length" and content:
+        continuations_used += 1
+        if on_progress:
+            on_progress("continuing", sum(len(x) for x in all_reasoning), len(content))
+        cleaned_prior = [
+            {k: v for k, v in m.items() if k != "reasoning_content"}
+            for m in working_msgs
+        ]
+        cont_msgs = [
+            *cleaned_prior,
+            {"role": "assistant", "content": content},
+            {
+                "role": "user",
+                "content": (
+                    "Your previous output hit the token limit mid-report. Continue SEAMLESSLY from the exact "
+                    "character where you stopped. Do NOT repeat earlier sections or numbers; preserve full "
+                    "consistency with your Executive Return Summary above and complete all remaining phases, "
+                    "the 17-item Phase 6 audit table, and the final `<!-- valuation-summary-json {...} -->` comment."
+                ),
+            },
+        ]
+        c_content, c_reasoning, c_finish, _c_tcs, c_usage = _single_deepseek_round(
+            http=http,
+            headers=headers,
+            payload=_build_payload(cont_msgs, include_tools=False),
+            timeout=timeout,
+            stream=stream,
+            on_progress=on_progress,
+        )
+        for k in total_usage:
+            total_usage[k] += c_usage[k]
+        if c_reasoning:
+            all_reasoning.append(c_reasoning)
+        if c_content:
+            content = (content.rstrip() + "\n" + c_content.lstrip()).strip()
+        finish_reason = c_finish
+
+    reasoning = "\n\n---\n\n".join(all_reasoning).strip()
+
+    if stats_out is not None:
+        stats_out["tool_calls_used"] = tool_calls_used
+        stats_out["continuations_used"] = continuations_used
+
+    if not content:
+        if finish_reason == "length" and reasoning:
+            raise RuntimeError(
+                f"DeepSeek exhausted the max_tokens limit ({max_tokens:,}) during internal reasoning "
+                f"({len(reasoning):,} chars of thoughts) before writing the final valuation. "
+                "Try attaching fewer raw SEC filings (rely on ValuationPack.md + CompanyBrief.md) or re-running."
+            )
+        raise RuntimeError("DeepSeek API returned an empty final answer.")
+
+    return content, reasoning, finish_reason, total_usage
 
 
 def call_deepseek(
@@ -690,13 +871,15 @@ def run_workflow_analysis(
     sys_prompt = str(wf.get("system_prompt") or SYSTEM_PROMPT_BASE) if wf else SYSTEM_PROMPT_BASE
     effective_max_tokens = int(max_tokens or (wf.get("max_tokens", 4096) if wf else 4096))
     effective_temp = float(wf["temperature"]) if (wf and "temperature" in wf) else 0.2
+    is_val = workflow_id == "scientific_valuation"
 
     # Place dossier in system message so follow-up turns hit DeepSeek's prompt cache!
-    messages = [
+    messages: List[Dict[str, Any]] = [
         {"role": "system", "content": f"{sys_prompt}\n\n# DOSSIER FOR {clean}\n\n{dossier_text}"},
         {"role": "user", "content": user_task},
     ]
 
+    run_stats: Dict[str, int] = {}
     content, reasoning, finish_reason, usage = call_deepseek_full(
         api_key=api_key,
         messages=messages,
@@ -705,6 +888,9 @@ def run_workflow_analysis(
         max_tokens=effective_max_tokens,
         stream=stream,
         on_progress=on_progress,
+        tools=VALUATION_TOOLS if is_val else None,
+        auto_continue=is_val,
+        stats_out=run_stats,
         session=session,
     )
 
@@ -733,6 +919,8 @@ def run_workflow_analysis(
         content=content,
         reasoning=reasoning,
         finish_reason=finish_reason,
+        tool_calls_used=run_stats.get("tool_calls_used", 0),
+        continuations_used=run_stats.get("continuations_used", 0),
         prompt_tokens=usage["prompt_tokens"],
         completion_tokens=usage["completion_tokens"],
         cache_hit_tokens=usage["cache_hit_tokens"],

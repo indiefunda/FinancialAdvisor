@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Dict, List
 
 import streamlit as st
+
+from valuation_math import VALUATION_TOOLS
 
 from ai_analyst import (
     ANALYSIS_WORKFLOWS,
@@ -679,11 +682,12 @@ with tab_ai:
                 f"No Markdown files found in `data/{ai_ticker}/` yet. Click **📦 Prepare Valuation Dataset for {ai_ticker}** above to fetch everything in one click."
             )
         else:
-            # Smart default selection: ValuationPack + Brief + Peers + 4 transcripts + 1 Annual (20-F/10-K) + 2 Quarterly/Earnings
+            # Smart default selection: ValuationPack + Brief + Peers + 4 transcripts + 1 Annual (20-F/10-K) + 2 distinct-date Quarterly/Earnings
             default_selected = []
             tr_count = 0
             annual_sec_count = 0
             other_sec_count = 0
+            seen_other_dates: set[str] = set()
             for df in dossier_files:
                 if df.category in ("Summary", "Valuation", "Peers"):
                     default_selected.append(df.rel_label)
@@ -696,6 +700,12 @@ with tab_ai:
                         default_selected.append(df.rel_label)
                         annual_sec_count += 1
                     elif not is_annual and other_sec_count < 2:
+                        m_date = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", df.rel_label)
+                        date_key = m_date.group(1) if m_date else ""
+                        if date_key and date_key in seen_other_dates:
+                            continue
+                        if date_key:
+                            seen_other_dates.add(date_key)
                         default_selected.append(df.rel_label)
                         other_sec_count += 1
             if not default_selected:
@@ -808,8 +818,26 @@ with tab_ai:
                 else:
                     progress_box = st.empty()
 
+                    _TOOL_LABELS = {
+                        "compute_operating_valuation_model": "5Y Operating Model & 3×3 Cross-Grid",
+                        "compute_pb_grid": "5Y P/B × ROE Model & 3×3 Cross-Grid",
+                        "compute_four_state_summary": "4-State Expected IRR, ±10 pp Sensitivity & Asymmetry",
+                        "compute_irr_and_returns": "Dated Cash-Flow IRR & MOIC",
+                    }
+
                     def _on_ds_progress(phase: str, r_chars: int, c_chars: int) -> None:
-                        if phase == "thinking":
+                        if phase.startswith("tool:"):
+                            t_raw = phase.split(":", 1)[1]
+                            t_nice = _TOOL_LABELS.get(t_raw, t_raw)
+                            progress_box.info(
+                                f"🧮 Python math engine calculating: **{t_nice}** (call #{c_chars})..."
+                            )
+                        elif phase == "continuing":
+                            progress_box.info(
+                                f"🔄 Auto-continuing valuation report seamlessly via prompt cache "
+                                f"({c_chars:,} chars written so far)..."
+                            )
+                        elif phase == "thinking":
                             progress_box.info(
                                 f"🧠 DeepSeek (`{ai_model}`) is reasoning through the protocol... "
                                 f"({r_chars:,} reasoning chars so far — please wait)"
@@ -844,11 +872,18 @@ with tab_ai:
 
             last_res = st.session_state.get("last_ai_result")
             if last_res and last_res.ticker == ai_ticker:
-                st.success(
-                    f"Completed via `{last_res.model}` | "
-                    f"Tokens: {last_res.prompt_tokens:,} in ({last_res.cache_hit_tokens:,} cached) / "
-                    f"{last_res.completion_tokens:,} out | Est. cost: **${last_res.estimated_cost_usd:.4f}**"
-                )
+                n_tools = getattr(last_res, "tool_calls_used", 0) or 0
+                n_cont = getattr(last_res, "continuations_used", 0) or 0
+                badge_parts = [
+                    f"Completed via `{last_res.model}`",
+                    f"Tokens: {last_res.prompt_tokens:,} in ({last_res.cache_hit_tokens:,} cached) / {last_res.completion_tokens:,} out",
+                    f"Est. cost: **${last_res.estimated_cost_usd:.4f}**",
+                ]
+                if n_tools > 0:
+                    badge_parts.append(f"🧮 Python math verified ({n_tools} call{'s' if n_tools != 1 else ''})")
+                if n_cont > 0:
+                    badge_parts.append("🔄 Auto-continued")
+                st.success(" | ".join(badge_parts))
                 if last_res.finish_reason == "length":
                     st.warning("Output hit the token cap (`finish_reason=length`). You can ask DeepSeek in the chat below to continue from where it stopped.")
                 if last_res.saved_path:
@@ -898,33 +933,110 @@ with tab_ai:
                     except (TypeError, ValueError, KeyError, ZeroDivisionError):
                         return
 
-                    k1, k2, k3, k4 = st.columns(4)
-                    with k1:
-                        st.metric(
-                            "Expected 5Y Return (USD)",
-                            f"{exp_tot:+.1f}%",
-                            f"{exp_moic:.2f}x MOIC · {exp_irr:+.1f}%/yr IRR",
+                    def _fnum(key: str) -> float | None:
+                        v = summary.get(key)
+                        if v is None or isinstance(v, bool):
+                            return None
+                        try:
+                            return float(v)
+                        except (TypeError, ValueError):
+                            return None
+
+                    with st.container(border=True):
+                        val_date = str(summary.get("valuation_date") or "").strip()
+                        title_suffix = f" · as of {val_date}" if val_date else ""
+                        st.markdown(f"#### 📊 Executive Return Dashboard (USD{title_suffix})")
+
+                        k1, k2, k3, k4 = st.columns(4)
+                        with k1:
+                            st.metric(
+                                "Expected 5Y Return (USD)",
+                                f"{exp_tot:+.1f}%",
+                                f"{exp_moic:.2f}x MOIC · {exp_irr:+.1f}%/yr IRR",
+                            )
+                        with k2:
+                            st.metric(
+                                "$10,000 Cumulative Proceeds",
+                                f"${ten_k_exp:,.0f}",
+                                f"Base: ${ten_k_base:,.0f} ({base_tot:+.1f}%)",
+                            )
+                        with k3:
+                            st.metric(
+                                f"Base Target ({yr})",
+                                f"${base_p:.2f}",
+                                f"Today: ${cur_p:.2f} · Bear→Bull: {bear_tot:+.0f}% to {bull_tot:+.0f}%",
+                                delta_color="off",
+                            )
+                        with k4:
+                            st.metric(
+                                "Downside & Asymmetry",
+                                f"{prob_loss:.0f}% Loss Prob.",
+                                f"5th Pct: {fifth_pct} · Asym: {asym_str}",
+                                delta_color="off",
+                            )
+
+                        # Build crisp Scenario Return Breakdown table when per-scenario keys are present
+                        scen_rows: List[Dict[str, str]] = []
+                        cat_yr_raw = summary.get("catastrophe_year")
+                        cat_horizon = (
+                            str(cat_yr_raw)
+                            if (isinstance(cat_yr_raw, (int, float)) and int(cat_yr_raw) >= 2000)
+                            else (f"Year {cat_yr_raw}" if cat_yr_raw else "Event Yr")
                         )
-                    with k2:
-                        st.metric(
-                            "$10,000 Cumulative Proceeds",
-                            f"${ten_k_exp:,.0f}",
-                            f"Base: ${ten_k_base:,.0f} ({base_tot:+.1f}%)",
-                        )
-                    with k3:
-                        st.metric(
-                            f"Base Target ({yr})",
-                            f"${base_p:.2f}",
-                            f"Today: ${cur_p:.2f} · Bear→Bull: {bear_tot:+.0f}% to {bull_tot:+.0f}%",
-                            delta_color="off",
-                        )
-                    with k4:
-                        st.metric(
-                            "Downside & Asymmetry",
-                            f"{prob_loss:.0f}% Loss Prob.",
-                            f"5th Pct: {fifth_pct} · Asym: {asym_str}",
-                            delta_color="off",
-                        )
+                        scen_specs = [
+                            ("Catastrophe", "catastrophe", "catastrophe_recovery_usd", cat_horizon),
+                            ("Bear", "bear", "bear_price_usd", str(yr)),
+                            ("Base", "base", "base_price_usd", str(yr)),
+                            ("Bull", "bull", "bull_price_usd", str(yr)),
+                        ]
+                        for label, pfx, price_key, horizon in scen_specs:
+                            p_pct = _fnum(f"prob_{pfx}_pct")
+                            moic_v = _fnum(f"{pfx}_moic")
+                            tot_v = _fnum(f"{pfx}_total_return_pct")
+                            irr_v = _fnum(f"{pfx}_irr_pct")
+                            px_v = _fnum(price_key)
+                            if moic_v is None and tot_v is not None:
+                                moic_v = 1.0 + tot_v / 100.0
+                            if tot_v is None and moic_v is not None:
+                                tot_v = (moic_v - 1.0) * 100.0
+                            if any(x is not None for x in (p_pct, moic_v, irr_v, px_v)):
+                                scen_rows.append({
+                                    "Scenario": label,
+                                    "Prob.": f"{p_pct:.0f}%" if p_pct is not None else "—",
+                                    "Horizon": horizon,
+                                    "Target / Recovery (USD)": f"${px_v:,.2f}" if px_v is not None else "—",
+                                    "MOIC": f"{moic_v:.2f}x" if moic_v is not None else "—",
+                                    "Total Return": f"{tot_v:+.1f}%" if tot_v is not None else "—",
+                                    "Annualized IRR": f"{irr_v:+.1f}%" if irr_v is not None else "—",
+                                    "$10,000 Becomes": f"${10_000 * moic_v:,.0f}" if moic_v is not None else "—",
+                                })
+
+                        if scen_rows:
+                            scen_rows.append({
+                                "Scenario": "Weighted Expected",
+                                "Prob.": "100%",
+                                "Horizon": "Multi-horizon",
+                                "Target / Recovery (USD)": "—",
+                                "MOIC": f"{exp_moic:.2f}x",
+                                "Total Return": f"{exp_tot:+.1f}%",
+                                "Annualized IRR": f"{exp_irr:+.1f}%",
+                                "$10,000 Becomes": f"${ten_k_exp:,.0f}",
+                            })
+                            st.dataframe(scen_rows, hide_index=True, use_container_width=True)
+
+                        # Compact sensitivity & distribution footer strip
+                        foot_bits: List[str] = []
+                        med_out = summary.get("median_outcome")
+                        if med_out:
+                            foot_bits.append(f"**Median:** {med_out}")
+                        s_m10 = _fnum("base_prob_minus10_irr_pct")
+                        s_p10 = _fnum("base_prob_plus10_irr_pct")
+                        if s_m10 is not None and s_p10 is not None:
+                            foot_bits.append(
+                                f"**Base Prob. Sensitivity (±10 pp):** {s_m10:+.1f}% → {exp_irr:+.1f}% → {s_p10:+.1f}% IRR"
+                            )
+                        if foot_bits:
+                            st.caption(" · ".join(foot_bits))
 
                 _render_val_cards(last_res.content)
                 if last_res.reasoning:
@@ -961,7 +1073,8 @@ with tab_ai:
 
                     dossier_text, _ = build_dossier_context(chosen_files)
                     chat_mode = st.session_state.get(f"deepseek_chat_mode_{ai_ticker}")
-                    chat_sys = SYSTEM_PROMPT_VALUATION_CHAT if chat_mode == "scientific_valuation" else SYSTEM_PROMPT_BASE
+                    is_val_chat = chat_mode == "scientific_valuation"
+                    chat_sys = SYSTEM_PROMPT_VALUATION_CHAT if is_val_chat else SYSTEM_PROMPT_BASE
                     candidate_history = st.session_state[chat_key] + [{"role": "user", "content": user_q}]
                     messages = [
                         {
@@ -974,20 +1087,28 @@ with tab_ai:
                         chat_prog = st.empty()
 
                         def _on_chat_progress(phase: str, r_chars: int, c_chars: int) -> None:
-                            if phase == "thinking":
+                            if phase.startswith("tool:"):
+                                chat_prog.caption(f"🧮 Python math calculating: `{phase.split(':', 1)[1]}` (call #{c_chars})...")
+                            elif phase == "continuing":
+                                chat_prog.caption(f"🔄 Continuing seamlessly... ({c_chars:,} chars)")
+                            elif phase == "thinking":
                                 chat_prog.caption(f"🧠 Thinking... ({r_chars:,} chars)")
                             else:
                                 chat_prog.caption(f"✍️ Writing... ({c_chars:,} chars)")
 
                         try:
+                            chat_stats: Dict[str, int] = {}
                             answer, chat_reasoning, _fin, usage = call_deepseek_full(
                                 api_key=deepseek_key,
                                 messages=messages,
                                 model=ai_model,
-                                temperature=0.0 if chat_mode == "scientific_valuation" else 0.2,
-                                max_tokens=65536 if chat_mode == "scientific_valuation" else 16384,
+                                temperature=0.0 if is_val_chat else 0.2,
+                                max_tokens=65536 if is_val_chat else 16384,
                                 stream=True,
                                 on_progress=_on_chat_progress,
+                                tools=VALUATION_TOOLS if is_val_chat else None,
+                                auto_continue=is_val_chat,
+                                stats_out=chat_stats,
                             )
                             chat_prog.empty()
                             if chat_reasoning:
@@ -1000,9 +1121,11 @@ with tab_ai:
                                 usage["completion_tokens"],
                                 usage["cache_hit_tokens"],
                             )
+                            ctools = chat_stats.get("tool_calls_used", 0)
+                            ctool_badge = f" | 🧮 Python math verified ({ctools} call{'s' if ctools != 1 else ''})" if ctools else ""
                             st.caption(
                                 f"Tokens: {usage['prompt_tokens']:,} in ({usage['cache_hit_tokens']:,} cached) / "
-                                f"{usage['completion_tokens']:,} out | Est. cost: ${c_usd:.4f}"
+                                f"{usage['completion_tokens']:,} out | Est. cost: ${c_usd:.4f}{ctool_badge}"
                             )
                             st.session_state[chat_key] = candidate_history + [{"role": "assistant", "content": answer}]
                         except Exception as exc:
