@@ -11,11 +11,16 @@ from ai_analyst import (
     ANALYSIS_WORKFLOWS,
     DEEPSEEK_MODELS,
     SYSTEM_PROMPT_BASE,
+    SYSTEM_PROMPT_VALUATION,
+    VALUATION_PROTOCOL_PATH,
+    ValuationParameters,
     build_dossier_context,
     call_deepseek,
     estimate_cost_usd,
     list_dossier_files,
+    load_valuation_protocol,
     run_workflow_analysis,
+    save_valuation_protocol,
 )
 from config_manager import (
     API_KEY_PROVIDERS,
@@ -512,15 +517,19 @@ with tab_ai:
         if not dossier_files:
             st.warning(f"No Markdown files found in `data/{ai_ticker}/` yet.")
         else:
-            # Smart default selection: summaries + valuation + peers + up to 4 most recent transcripts
+            # Smart default selection: summaries + valuation + peers + up to 4 transcripts + 2 newest SEC filings
             default_selected = []
             tr_count = 0
+            sec_count = 0
             for df in dossier_files:
                 if df.category in ("Summary", "Valuation", "Peers"):
                     default_selected.append(df.rel_label)
                 elif df.category == "Transcript" and tr_count < 4:
                     default_selected.append(df.rel_label)
                     tr_count += 1
+                elif df.category == "SEC Filing" and sec_count < 2:
+                    default_selected.append(df.rel_label)
+                    sec_count += 1
             if not default_selected:
                 default_selected = [dossier_files[0].rel_label]
 
@@ -529,18 +538,93 @@ with tab_ai:
                 "Attach Local Files to DeepSeek Context (1M-token window)",
                 options=list(file_map.keys()),
                 default=default_selected,
-                help="Attaching CompanyBrief.md + DCF_Summary.md + 4 transcripts is ideal for DCF Reality Check & Promise Tracker.",
+                help="Attaching CompanyBrief.md + Peers.md + recent SEC filings (10-K/20-F/10-Q) + 4 transcripts gives DeepSeek everything needed for your 5-Year Hurdle-Rate Valuation.",
             )
             chosen_files = [file_map[lbl] for lbl in chosen_labels]
 
             # Live token & cost preview before calling DeepSeek
             total_bytes = sum(f.size_bytes for f in chosen_files)
             est_in_tokens = max(1, total_bytes // 4) if chosen_files else 0
-            est_cost_miss = estimate_cost_usd(ai_model, est_in_tokens, 2000, cache_hit_tokens=0)
-            est_cost_hit = estimate_cost_usd(ai_model, est_in_tokens, 2000, cache_hit_tokens=est_in_tokens)
+            est_cost_miss = estimate_cost_usd(ai_model, est_in_tokens, 4000, cache_hit_tokens=0)
+            est_cost_hit = estimate_cost_usd(ai_model, est_in_tokens, 4000, cache_hit_tokens=est_in_tokens)
             st.caption(
                 f"Attached: **{len(chosen_files)} file(s)** (~{est_in_tokens:,} input tokens) | "
                 f"Est. off-peak cost: **${est_cost_miss:.4f}** (1st run) / **${est_cost_hit:.4f}** (cached follow-up)"
+            )
+
+            # ── Custom Valuation Parameters & Editable Protocol ──────────────
+            has_foreign_filing = any(
+                ("20-F" in df.rel_label.upper() or "6-K" in df.rel_label.upper())
+                for df in dossier_files
+            )
+            with st.expander("⚙️ 5-Year Hurdle-Rate Valuation Parameters & Editable Protocol", expanded=False):
+                st.caption(
+                    f"Active protocol file: `{VALUATION_PROTOCOL_PATH.name}` — edit parameters per run or "
+                    "modify the full Markdown protocol below to evolve your methodology over time."
+                )
+                vp1, vp2, vp3 = st.columns(3)
+                with vp1:
+                    hurdle_rate = st.number_input("Target Hurdle Rate H (%)", 1.0, 50.0, 15.0, 0.5, key="vp_hurdle")
+                    home_ccy = st.text_input("Investor Home Currency", value="USD", key="vp_home_ccy")
+                    div_wht = st.number_input("Dividend Withholding Tax (%)", 0.0, 50.0, 10.0, 1.0, key="vp_wht")
+                with vp2:
+                    spot_price_ov = st.text_input(
+                        "Current Price Override (optional)",
+                        placeholder="e.g. USD 4.50 [Market Data: Yahoo, 2026-11-24]",
+                        key=f"vp_price_{ai_ticker}",
+                    )
+                    spot_fx_ov = st.text_input(
+                        "Spot FX Rate Override (optional)",
+                        placeholder="e.g. 7.24 CNY/USD [Market Data: ECB, 2026-11-24]",
+                        key=f"vp_fx_{ai_ticker}",
+                    )
+                    adr_fee = st.text_input("Annual ADR/Custody Fee (Home CCY/sh)", value="0.00", key=f"vp_adr_{ai_ticker}")
+                with vp3:
+                    exit_cgt = st.number_input("Exit Capital-Gains Tax (%)", 0.0, 50.0, 0.0, 1.0, key="vp_cgt")
+                    max_impair = st.number_input("Worst-State Portfolio Loss Cap (%)", 0.5, 25.0, 2.5, 0.5, key="vp_impair")
+                    single_cap = st.number_input("Single-Stock Concentration Cap (%)", 1.0, 50.0, 15.0, 1.0, key="vp_cap")
+
+                cross_border = st.checkbox(
+                    "Activate Optional Cross-Border / Emerging Market / VIE Risk Module",
+                    value=has_foreign_filing,
+                    key=f"vp_cb_{ai_ticker}",
+                    help="Auto-checked when 20-F or 6-K filings are detected in the dossier.",
+                )
+                custom_run_notes = st.text_area(
+                    "Per-Run Analyst Notes / Live Peer Multiples (optional)",
+                    placeholder="e.g. Peer median EV/NOPAT = 11.5x (Peers: X, Y, Z [Market Data: Koyfin, 2026-11-24]). Use GAAP SBC basis.",
+                    height=70,
+                    key=f"vp_notes_{ai_ticker}",
+                )
+
+                st.markdown("---")
+                st.markdown("**Edit Valuation Protocol (`valuation_protocol.md`)**")
+                current_protocol = load_valuation_protocol()
+                edited_protocol = st.text_area(
+                    "Full Protocol Markdown (changes apply to all future valuation runs)",
+                    value=current_protocol,
+                    height=260,
+                    key="vp_protocol_editor",
+                )
+                if st.button("💾 Save Valuation Protocol", key="save_vp_protocol"):
+                    try:
+                        save_valuation_protocol(edited_protocol)
+                        st.success(f"Saved updated protocol to `{VALUATION_PROTOCOL_PATH.name}`!")
+                    except Exception as exc:
+                        st.error(f"Could not save protocol: {exc}")
+
+            val_params = ValuationParameters(
+                hurdle_rate_pct=float(hurdle_rate),
+                home_currency=home_ccy,
+                spot_price=spot_price_ov,
+                spot_fx_rate=spot_fx_ov,
+                dividend_withholding_tax_pct=float(div_wht),
+                adr_custody_fee=adr_fee,
+                exit_cgt_pct=float(exit_cgt),
+                max_impairment_pct=float(max_impair),
+                single_stock_cap_pct=float(single_cap),
+                activate_cross_border_module=bool(cross_border),
+                custom_notes=custom_run_notes,
             )
 
             st.divider()
@@ -554,7 +638,8 @@ with tab_ai:
             triggered_wf = None
             for idx, (wf_id, wf_meta) in enumerate(wf_items):
                 with wf_cols[idx % 2]:
-                    if st.button(wf_meta["label"], key=f"wf_{wf_id}", help=wf_meta["short_desc"]):
+                    btn_type = "primary" if wf_id == "scientific_valuation" else "secondary"
+                    if st.button(wf_meta["label"], key=f"wf_{wf_id}", help=wf_meta["short_desc"], type=btn_type):
                         triggered_wf = wf_id
                     st.caption(wf_meta["short_desc"])
 
@@ -574,6 +659,8 @@ with tab_ai:
                                 files=chosen_files,
                                 api_key=deepseek_key,
                                 model=ai_model,
+                                valuation_params=val_params if triggered_wf == "scientific_valuation" else None,
+                                protocol_text=edited_protocol if triggered_wf == "scientific_valuation" else None,
                                 save_memo=save_memo_opt,
                             )
                         st.session_state["last_ai_result"] = res
@@ -589,12 +676,26 @@ with tab_ai:
                 )
                 if last_res.saved_path:
                     st.caption(f"Saved memo: `{last_res.saved_path}`")
-                st.download_button(
-                    "⬇️ Download Analysis Memo (.md)",
-                    data=last_res.content,
-                    file_name=f"{last_res.ticker}_{last_res.workflow_id}.md",
-                    mime="text/markdown",
-                )
+                act1, act2 = st.columns([1, 1])
+                with act1:
+                    st.download_button(
+                        "⬇️ Download Analysis Memo (.md)",
+                        data=last_res.content,
+                        file_name=f"{last_res.ticker}_{last_res.workflow_id}.md",
+                        mime="text/markdown",
+                    )
+                with act2:
+                    if st.button(
+                        "💬 Continue & Tweak in Chat Below",
+                        key=f"seed_chat_{ai_ticker}_{last_res.workflow_id}",
+                        help="Copies this analysis into the prompt-cached chat so you can challenge assumptions or re-run scenarios.",
+                    ):
+                        chat_key_seed = f"deepseek_chat_{ai_ticker}"
+                        st.session_state[chat_key_seed] = [
+                            {"role": "assistant", "content": last_res.content},
+                        ]
+                        st.session_state[f"deepseek_chat_mode_{ai_ticker}"] = last_res.workflow_id
+                        st.rerun()
                 st.markdown(last_res.content)
 
             st.divider()
@@ -607,30 +708,33 @@ with tab_ai:
 
             if st.button("Clear chat history", key=f"clear_{chat_key}"):
                 st.session_state[chat_key] = []
+                st.session_state.pop(f"deepseek_chat_mode_{ai_ticker}", None)
                 st.rerun()
 
             for msg in st.session_state[chat_key]:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
 
-            user_q = st.chat_input(f"Ask anything about {ai_ticker} (grounded in attached files)...")
+            user_q = st.chat_input(f"Ask anything about {ai_ticker} or tweak valuation assumptions...")
             if user_q:
                 if not deepseek_key:
                     st.error("Please configure your DeepSeek API key in the sidebar first.")
                 elif not chosen_files:
                     st.warning("Attach at least one dossier file above.")
                 else:
-                    st.session_state[chat_key].append({"role": "user", "content": user_q})
                     with st.chat_message("user"):
                         st.markdown(user_q)
 
                     dossier_text, _ = build_dossier_context(chosen_files)
+                    chat_mode = st.session_state.get(f"deepseek_chat_mode_{ai_ticker}")
+                    chat_sys = SYSTEM_PROMPT_VALUATION if chat_mode == "scientific_valuation" else SYSTEM_PROMPT_BASE
+                    candidate_history = st.session_state[chat_key] + [{"role": "user", "content": user_q}]
                     messages = [
                         {
                             "role": "system",
-                            "content": f"{SYSTEM_PROMPT_BASE}\n\n# DOSSIER FOR {ai_ticker}\n\n{dossier_text}",
+                            "content": f"{chat_sys}\n\n# DOSSIER FOR {ai_ticker}\n\n{dossier_text}",
                         }
-                    ] + st.session_state[chat_key]
+                    ] + candidate_history
 
                     with st.chat_message("assistant"):
                         try:
@@ -639,6 +743,7 @@ with tab_ai:
                                     api_key=deepseek_key,
                                     messages=messages,
                                     model=ai_model,
+                                    max_tokens=8192 if chat_mode == "scientific_valuation" else 4096,
                                 )
                             st.markdown(answer)
                             c_usd = estimate_cost_usd(
@@ -651,7 +756,7 @@ with tab_ai:
                                 f"Tokens: {usage['prompt_tokens']:,} in ({usage['cache_hit_tokens']:,} cached) / "
                                 f"{usage['completion_tokens']:,} out | Est. cost: ${c_usd:.4f}"
                             )
-                            st.session_state[chat_key].append({"role": "assistant", "content": answer})
+                            st.session_state[chat_key] = candidate_history + [{"role": "assistant", "content": answer}]
                         except Exception as exc:
                             st.error(f"DeepSeek chat error: {exc}")
 

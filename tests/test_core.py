@@ -10,11 +10,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ai_analyst import (
+    ValuationParameters,
     build_dossier_context,
     call_deepseek,
     estimate_cost_usd,
     list_dossier_files,
+    load_valuation_protocol,
     run_workflow_analysis,
+    save_valuation_protocol,
 )
 from config_manager import (
     QuotaManager,
@@ -640,3 +643,65 @@ def test_call_deepseek_handles_non_json_and_missing_key():
 
     with pytest.raises(RuntimeError, match="non-JSON"):
         call_deepseek("sk-test", [{"role": "user", "content": "hi"}], session=bad_session)
+
+
+def test_scientific_valuation_protocol_editable_and_wired(tmp_path: Path):
+    # 1. Default valuation_protocol.md loads cleanly with all core guardrails
+    proto = load_valuation_protocol()
+    assert "NO CAPM, NO BETA, NO WACC" in proto
+    assert "Phase 6: Mandatory Self-Audit" in proto
+    assert "Quarter-Kelly" in proto
+
+    # 2. User can save edits to a custom protocol file (and empty text is rejected)
+    custom_path = tmp_path / "valuation_protocol.md"
+    save_valuation_protocol("# My Updated Protocol\nHurdle: 18%\n", path=custom_path)
+    assert "Hurdle: 18%" in load_valuation_protocol(path=custom_path)
+    with pytest.raises(ValueError, match="empty"):
+        save_valuation_protocol("   ", path=custom_path)
+
+    # 3. ValuationParameters + scientific_valuation workflow passes CAPM-free system prompt & max_tokens=8192
+    t_dir = tmp_path / "HUIZ"
+    t_dir.mkdir(parents=True)
+    (t_dir / "CompanyBrief.md").write_text("# HUIZ Brief\nTTM Revenue (CNY): CNY 1.34B\n", encoding="utf-8")
+    files = list_dossier_files("HUIZ", data_root=tmp_path)
+
+    params = ValuationParameters(
+        hurdle_rate_pct=18.0,
+        home_currency="EUR",
+        spot_price="USD 4.50 [Market Data: Yahoo, 2026-11-24]",
+        spot_fx_rate="0.92 EUR/USD [Market Data: ECB, 2026-11-24]",
+        activate_cross_border_module=True,
+        custom_notes="Use GAAP SBC basis.",
+    )
+
+    mock_session = MagicMock()
+    mock_resp = MagicMock(status_code=200)
+    mock_resp.json.return_value = {
+        "choices": [{"message": {"content": "## Phase 1\nClean baseline...\n## Phase 6\nAll PASS."}}],
+        "usage": {"prompt_tokens": 2500, "completion_tokens": 1200, "prompt_cache_hit_tokens": 0},
+    }
+    mock_session.post.return_value = mock_resp
+
+    res = run_workflow_analysis(
+        ticker="HUIZ",
+        workflow_id="scientific_valuation",
+        files=files,
+        api_key="sk-test",
+        model="deepseek-v4-pro",
+        valuation_params=params,
+        protocol_text=load_valuation_protocol(path=custom_path),
+        save_memo=True,
+        data_root=tmp_path,
+        session=mock_session,
+    )
+    assert res.saved_path is not None and res.saved_path.exists()
+    sent_payload = mock_session.post.call_args.kwargs["json"]
+    assert sent_payload["max_tokens"] == 8192
+    assert "NEVER use CAPM, Beta, or WACC" in sent_payload["messages"][0]["content"]
+    user_msg = sent_payload["messages"][1]["content"]
+    assert "18.00% nominal annual IRR" in user_msg
+    assert "`EUR`" in user_msg
+    assert "ACTIVE — include the full Cross-Border" in user_msg
+    assert "Use GAAP SBC basis." in user_msg
+    assert "My Updated Protocol" in user_msg
+

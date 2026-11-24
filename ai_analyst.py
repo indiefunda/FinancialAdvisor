@@ -43,6 +43,8 @@ DEEPSEEK_MODELS: Dict[str, Dict[str, Any]] = {
 
 DEFAULT_MODEL = "deepseek-flash"
 
+VALUATION_PROTOCOL_PATH = Path(__file__).resolve().parent / "valuation_protocol.md"
+
 SYSTEM_PROMPT_BASE = (
     "You are a senior buy-side equity research analyst. "
     "You MUST ground every number, ratio, quote, and claim strictly in the attached "
@@ -53,10 +55,118 @@ SYSTEM_PROMPT_BASE = (
     "This is analytical research, not personalized financial advice."
 )
 
-ANALYSIS_WORKFLOWS: Dict[str, Dict[str, str]] = {
+SYSTEM_PROMPT_VALUATION = (
+    "You are an institutional, fundamental long-term equity analyst in the tradition of "
+    "Warren Buffett, Bruce Greenwald, and Michael Mauboussin. "
+    "Execute the user's attached Scientific 5-Year Equity Return & Valuation Protocol rigorously "
+    "using the attached financial dossier (SEC filings, earnings transcripts, CompanyBrief.md, Peers.md). "
+    "STRICTLY obey all mathematical and data-hygiene rules in the protocol: "
+    "NEVER use CAPM, Beta, or WACC (ignore any WACC/Beta figures if a reference file mentions them). "
+    "Tag every numerical input as `[Filing: Document, Period, Line Item]`, `[Market Data: Source, Date]`, "
+    "or `[Assumption]`, or write `\"not provided\"` rather than inventing missing figures. "
+    "Show all math transparently, complete the Phase 6 Mandatory Self-Audit table at the end, "
+    "and do NOT hedge with generic financial disclaimers."
+)
+
+
+@dataclass
+class ValuationParameters:
+    """Configurable investor parameters passed dynamically to the custom valuation protocol."""
+
+    hurdle_rate_pct: float = 15.0
+    home_currency: str = "USD"
+    spot_price: str = ""
+    spot_fx_rate: str = ""
+    dividend_withholding_tax_pct: float = 10.0
+    adr_custody_fee: str = "0.00"
+    exit_cgt_pct: float = 0.0
+    max_impairment_pct: float = 2.5
+    single_stock_cap_pct: float = 15.0
+    activate_cross_border_module: bool = False
+    custom_notes: str = ""
+
+    def to_prompt_block(self) -> str:
+        """Render active investor parameters as an explicit override block for DeepSeek."""
+        cgt_line = (
+            f"{self.exit_cgt_pct:.2f}% (deduct personal exit capital-gains tax at Year 5)"
+            if self.exit_cgt_pct > 0
+            else "0% (pre-capital-gains tax — default)"
+        )
+        price_line = self.spot_price.strip() if self.spot_price.strip() else "Use latest dated price in attached dossier (or halt per Rule 7 if absent)"
+        fx_line = self.spot_fx_rate.strip() if self.spot_fx_rate.strip() else "Use latest dated FX rate in attached dossier (or 1.00 if reporting currency == home currency; halt per Rule 7 if cross-currency FX is absent)"
+        cross_border_line = (
+            "ACTIVE — include the full Cross-Border / Emerging Market / VIE Risk module."
+            if self.activate_cross_border_module
+            else "INACTIVE (activate only if filings reveal a foreign/ADR/VIE structure)."
+        )
+        lines = [
+            "## Active Investor Parameters & Run Overrides",
+            f"- **Target Hurdle Rate ($H$):** {self.hurdle_rate_pct:.2f}% nominal annual IRR (home currency, net of dividend WHT & ADR/custody fees)",
+            f"- **Investor Home Currency:** `{self.home_currency.strip().upper() or 'USD'}`",
+            f"- **Current Share/ADS Price Override:** {price_line}",
+            f"- **Spot FX Rate Override:** {fx_line}",
+            f"- **Dividend Withholding Tax:** {self.dividend_withholding_tax_pct:.2f}%",
+            f"- **Annual ADR / Custody Fee (per share, Home CCY):** {self.adr_custody_fee.strip() or '0.00'}",
+            f"- **Personal Exit Capital-Gains Tax:** {cgt_line}",
+            f"- **Portfolio Risk Budget:** Worst-state portfolio impairment cap = {self.max_impairment_pct:.2f}%; Single-Stock Concentration Cap = {self.single_stock_cap_pct:.2f}%",
+            f"- **Optional Cross-Border / EM / VIE Module:** {cross_border_line}",
+        ]
+        if self.custom_notes.strip():
+            lines.extend([
+                "",
+                "### Additional Analyst Overrides / Live Market Inputs",
+                self.custom_notes.strip(),
+            ])
+        return "\n".join(lines)
+
+
+def load_valuation_protocol(path: Path = VALUATION_PROTOCOL_PATH) -> str:
+    """Load the user's editable valuation protocol Markdown from disk."""
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return (
+        "# Custom Valuation Protocol\n\n"
+        "valuation_protocol.md was not found. Perform a CAPM/WACC-free 5-year IRR valuation "
+        "grounded strictly in the attached financial filings."
+    )
+
+
+def save_valuation_protocol(text: str, path: Path = VALUATION_PROTOCOL_PATH) -> Path:
+    """Persist edits to the user's valuation protocol Markdown file."""
+    cleaned = text.strip()
+    if not cleaned:
+        raise ValueError("Valuation protocol cannot be empty.")
+    path.write_text(cleaned + "\n", encoding="utf-8")
+    return path
+
+
+def build_scientific_valuation_prompt(
+    protocol_text: Optional[str] = None,
+    params: Optional[ValuationParameters] = None,
+) -> str:
+    """Assemble the complete user prompt combining active investor parameters + valuation protocol."""
+    proto = protocol_text.strip() if protocol_text and protocol_text.strip() else load_valuation_protocol()
+    p = params or ValuationParameters()
+    return (
+        f"{p.to_prompt_block()}\n\n"
+        "---\n\n"
+        "Follow the exact Valuation Protocol below step-by-step for the company in the attached dossier:\n\n"
+        f"{proto}"
+    )
+
+
+ANALYSIS_WORKFLOWS: Dict[str, Dict[str, Any]] = {
+    "scientific_valuation": {
+        "label": "🧮 5-Year Hurdle-Rate Valuation (Custom Protocol)",
+        "short_desc": "Run your editable CAPM/WACC-free 6-phase IRR & Quarter-Kelly protocol over SEC filings & transcripts.",
+        "max_tokens": 8192,
+        "system_prompt": SYSTEM_PROMPT_VALUATION,
+        "prompt": "",  # Built dynamically from valuation_protocol.md + ValuationParameters
+    },
     "dcf_audit": {
         "label": "🎯 DCF vs. Guidance Reality Check",
         "short_desc": "Cross-examine DCF assumptions against management's actual transcript guidance & verbatim quotes.",
+        "max_tokens": 4096,
         "prompt": (
             "Cross-examine the automated DCF model assumptions (WACC, Years 1–5 & 6–10 growth, "
             "FCF margin, terminal growth, fair price) against management's actual guidance, "
@@ -348,6 +458,9 @@ def run_workflow_analysis(
     api_key: str,
     model: str = DEFAULT_MODEL,
     custom_prompt: Optional[str] = None,
+    valuation_params: Optional[ValuationParameters] = None,
+    protocol_text: Optional[str] = None,
+    max_tokens: Optional[int] = None,
     save_memo: bool = True,
     data_root: Path = DEFAULT_DATA_ROOT,
     session: Optional[requests.Session] = None,
@@ -359,13 +472,25 @@ def run_workflow_analysis(
 
     dossier_text, _ = build_dossier_context(files)
     wf = ANALYSIS_WORKFLOWS.get(workflow_id)
-    user_task = custom_prompt.strip() if custom_prompt else (wf["prompt"] if wf else "")
+    if custom_prompt and custom_prompt.strip():
+        user_task = custom_prompt.strip()
+    elif workflow_id == "scientific_valuation":
+        user_task = build_scientific_valuation_prompt(
+            protocol_text=protocol_text,
+            params=valuation_params,
+        )
+    else:
+        user_task = str(wf["prompt"]) if wf else ""
+
     if not user_task:
         raise ValueError("Provide a valid workflow or question.")
 
+    sys_prompt = str(wf.get("system_prompt") or SYSTEM_PROMPT_BASE) if wf else SYSTEM_PROMPT_BASE
+    effective_max_tokens = int(max_tokens or (wf.get("max_tokens", 4096) if wf else 4096))
+
     # Place dossier in system message so follow-up turns hit DeepSeek's prompt cache!
     messages = [
-        {"role": "system", "content": f"{SYSTEM_PROMPT_BASE}\n\n# DOSSIER FOR {clean}\n\n{dossier_text}"},
+        {"role": "system", "content": f"{sys_prompt}\n\n# DOSSIER FOR {clean}\n\n{dossier_text}"},
         {"role": "user", "content": user_task},
     ]
 
@@ -373,6 +498,7 @@ def run_workflow_analysis(
         api_key=api_key,
         messages=messages,
         model=model,
+        max_tokens=effective_max_tokens,
         session=session,
     )
 
