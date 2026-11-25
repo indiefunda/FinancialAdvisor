@@ -268,15 +268,21 @@ with tab_sec:
                     st.error(f"SEC download failed: {exc}")
                 else:
                     if res.converted_files:
+                        src_tag = (
+                            "via official SEC EDGAR API fallback"
+                            if getattr(res, "source_used", "") == "sec_edgar_api"
+                            else f"across {res.forms_succeeded}/{res.forms_requested} queried form types"
+                        )
+                        cik_tag = f" (CIK `{res.resolved_cik}`)" if getattr(res, "resolved_cik", "") else ""
                         st.success(
-                            f"Found **{res.submissions_found}** submission(s) across "
-                            f"{res.forms_succeeded}/{res.forms_requested} queried form types. "
+                            f"Found **{res.submissions_found}** submission(s) for `{clean_t}`{cik_tag} {src_tag}. "
                             f"Converted **{len(res.converted_files)}** cleaned Markdown documents "
                             f"(skipped {res.skipped_unparseable} unparseable)."
                         )
                     else:
+                        cik_note = f" (CIK `{res.resolved_cik}`)" if getattr(res, "resolved_cik", "") else " (CIK unresolved)"
                         st.warning(
-                            f"Queried {res.forms_succeeded}/{res.forms_requested} form types, "
+                            f"Queried {res.forms_succeeded}/{res.forms_requested} form types{cik_note}, "
                             f"but 0 convertible filings were found for `{clean_t}` in the last "
                             f"{int(sec_years)} year(s)."
                         )

@@ -42,11 +42,14 @@ from fundamentals import (
 )
 from markdown_cleanup import cleanup_markdown_tables
 from sec_downloader import (
+    _TICKER_CIK_CACHE,
     deduplicate_filename,
     download_and_convert_sec_filings,
+    html_to_markdown,
     is_useful_document,
     is_within_filing_window,
     make_sec_filename,
+    resolve_ticker_to_cik,
     sanitize_ticker,
 )
 from transcript_providers import (
@@ -1545,6 +1548,119 @@ def test_peer_quality_gate_filters_stale_nanocaps_and_near_zero_ev(tmp_path: Pat
     assert "`ZBAO` (mcap USD 3.20M" in txt
     # Median EV/NOPAT uses WDH (3.84x) and OSCR (12.50x) -> 8.17x (NOT dragged down by HUIZ 0.10x!)
     assert "**8.17x**" in txt
+
+
+def test_sec_edgar_api_fallback_when_datamule_returns_zero_submissions(tmp_path: Path, monkeypatch):
+    import sys
+    import types
+
+    _TICKER_CIK_CACHE.clear()
+
+    # Fake datamule Portfolio that succeeds without error yet downloads 0 files (exact silent-403 bug!)
+    seen_dm_kwargs = []
+
+    class _EmptyPortfolio:
+        def __init__(self, path):
+            self.path = path
+
+        def download_submissions(self, **kwargs):
+            seen_dm_kwargs.append(kwargs)
+
+        def __iter__(self):
+            return iter([])
+
+    fake_dm = types.ModuleType("datamule")
+    fake_dm.Portfolio = _EmptyPortfolio
+    monkeypatch.setitem(sys.modules, "datamule", fake_dm)
+    monkeypatch.setattr("sec_downloader.time.sleep", lambda _: None)
+
+    def _mk_resp(status=200, json_data=None, text_data=""):
+        r = MagicMock(status_code=status, text=text_data)
+        if json_data is not None:
+            r.json.return_value = json_data
+        return r
+
+    index_20f = (
+        "<table><tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th><th>Size</th></tr>"
+        "<tr><td>1</td><td>20-F</td><td>qfin-20251231x20f.htm iXBRL</td><td>20-F</td><td>12345</td></tr>"
+        "<tr><td>2</td><td>Cert</td><td>ex31-1.htm</td><td>EX-31.1</td><td>999</td></tr></table>"
+    )
+    index_6k = (
+        "<table><tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th><th>Size</th></tr>"
+        "<tr><td>1</td><td>6-K</td><td>qfin-6k.htm</td><td>6-K</td><td>2000</td></tr>"
+        "<tr><td>2</td><td>Press Release</td><td>qfin-ex99d1.htm</td><td>EX-99.1</td><td>8000</td></tr></table>"
+    )
+    html_20f = (
+        "<html><head><style>.x{color:red}</style></head><body>"
+        "<h1>Qfin Holdings FY2025 20-F</h1>"
+        "<table><tr><th>Metric</th><th></th><th>2025</th></tr>"
+        "<tr><td>Net Revenue</td><td>$</td><td>3,088.5</td></tr></table>"
+        "</body></html>"
+    )
+    html_6k = "<html><body><p>Form 6-K Cover</p></body></html>"
+    html_ex99 = "<html><body><h2>Q3 2026 Results</h2><p>Revenue RMB 3,088.5M</p></body></html>"
+
+    today_yr = date.today().year
+    d_20f = f"{today_yr}-04-28"
+    d_6k = f"{today_yr}-08-25"
+
+    def _fake_get(url, headers=None, timeout=None):
+        assert "User-Agent" in (headers or {})
+        if url.endswith("company_tickers.json"):
+            return _mk_resp(json_data={"0": {"cik_str": 1741530, "ticker": "QFIN", "title": "Qfin Holdings, Inc."}})
+        if url.endswith("CIK0001741530.json"):
+            return _mk_resp(json_data={
+                "filings": {
+                    "recent": {
+                        "form": ["20-F", "6-K", "4"],
+                        "filingDate": [d_20f, d_6k, d_6k],
+                        "reportDate": [f"{today_yr - 1}-12-31", f"{today_yr}-06-30", ""],
+                        "accessionNumber": ["0001104659-26-049501", "0001104659-26-088888", "0001104659-26-099999"],
+                        "primaryDocument": ["qfin-20251231x20f.htm", "qfin-6k.htm", "form4.xml"],
+                    },
+                    "files": [],
+                }
+            })
+        if url.endswith("0001104659-26-049501-index.htm"):
+            return _mk_resp(text_data=index_20f)
+        if url.endswith("0001104659-26-088888-index.htm"):
+            return _mk_resp(text_data=index_6k)
+        if url.endswith("qfin-20251231x20f.htm"):
+            return _mk_resp(text_data=html_20f)
+        if url.endswith("qfin-6k.htm"):
+            return _mk_resp(text_data=html_6k)
+        if url.endswith("qfin-ex99d1.htm"):
+            return _mk_resp(text_data=html_ex99)
+        return _mk_resp(status=404)
+
+    mock_sess = MagicMock()
+    mock_sess.get.side_effect = _fake_get
+
+    res = download_and_convert_sec_filings(
+        ticker="QFIN",
+        form_codes=["20-F", "10-K", "6-K"],
+        num_years=1,
+        data_root=tmp_path,
+        session=mock_sess,
+    )
+    assert res.resolved_cik == "0001741530"
+    assert res.source_used == "sec_edgar_api"
+    assert res.submissions_found == 2
+    assert len(res.converted_files) == 3  # 20-F + 6-K + EX-99.1 (EX-31.1 & Form 4 filtered out!)
+    assert all(kw.get("cik") == "0001741530" for kw in seen_dm_kwargs)
+
+    names = sorted(p.name for p in res.converted_files)
+    assert any("20-F" in n for n in names)
+    assert any("EX-99.1" in n for n in names)
+
+    f_20f = next(p for p in res.converted_files if "20-F" in p.name)
+    body = f_20f.read_text(encoding="utf-8")
+    assert "accession_number: 0001104659-26-049501" in body
+    assert "| Net Revenue | 3,088.5 |" in body
+    assert "color:red" not in body
+    assert html_to_markdown("<h2>Title</h2><p>Hello&nbsp;World</p>") == "## Title\n\nHello World"
+    assert resolve_ticker_to_cik("QFIN", session=mock_sess) == "0001741530"
+
 
 
 

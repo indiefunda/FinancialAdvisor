@@ -5,11 +5,16 @@ Used by both `app.py` (Streamlit UI) and `download_data.py` (CLI).
 
 from __future__ import annotations
 
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date
+from html.parser import HTMLParser
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+
+import requests
 
 from markdown_cleanup import cleanup_markdown_tables
 
@@ -272,6 +277,226 @@ def strip_sec_metadata_header(text: str) -> str:
     return text
 
 
+DEFAULT_SEC_USER_AGENT = "FinancialAdvisor ResearchWorkbench (research@financialadvisor.app)"
+_TICKER_CIK_CACHE: Dict[str, str] = {}
+
+
+def _sec_user_agent() -> str:
+    return os.environ.get("DATAMULE_SEC_USER_AGENT", "").strip() or DEFAULT_SEC_USER_AGENT
+
+
+def _sec_headers() -> Dict[str, str]:
+    return {
+        "User-Agent": _sec_user_agent(),
+        "Accept-Encoding": "gzip, deflate",
+    }
+
+
+def resolve_ticker_to_cik(
+    ticker: str,
+    session: Optional[requests.Session] = None,
+) -> Optional[str]:
+    """Resolve a stock ticker to its 10-digit zero-padded SEC CIK via official `company_tickers.json`."""
+    clean = sanitize_ticker(ticker)
+    if clean in _TICKER_CIK_CACHE:
+        return _TICKER_CIK_CACHE[clean]
+
+    http = session or requests.Session()
+    try:
+        resp = http.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers=_sec_headers(),
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return None
+        payload = resp.json()
+    except Exception:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    for entry in payload.values():
+        if not isinstance(entry, dict):
+            continue
+        sym = str(entry.get("ticker") or "").strip().upper()
+        cik_raw = entry.get("cik_str")
+        if not sym or cik_raw is None:
+            continue
+        try:
+            cik_10 = str(int(cik_raw)).zfill(10)
+        except (TypeError, ValueError):
+            continue
+        _TICKER_CIK_CACHE[sym] = cik_10
+        if "-" in sym:
+            _TICKER_CIK_CACHE.setdefault(sym.replace("-", "."), cik_10)
+        elif "." in sym:
+            _TICKER_CIK_CACHE.setdefault(sym.replace(".", "-"), cik_10)
+
+    return _TICKER_CIK_CACHE.get(clean) or _TICKER_CIK_CACHE.get(clean.replace(".", "-"))
+
+
+class _SecHtmlToMarkdown(HTMLParser):
+    """Lightweight, zero-dependency HTML/iXBRL-to-Markdown converter preserving SEC financial tables."""
+
+    _SKIP_TAGS = {"script", "style", "head", "title", "noscript", "ix:hidden", "ix:header"}
+    _BLOCK_TAGS = {"p", "div", "section", "article", "blockquote", "hr", "pre"}
+    _HEADING_TAGS = {"h1": "#", "h2": "##", "h3": "###", "h4": "####", "h5": "#####", "h6": "######"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self._out: List[str] = []
+        self._in_table = 0
+        self._cur_rows: List[List[str]] = []
+        self._cur_row: Optional[List[str]] = None
+        self._cur_cell: Optional[List[str]] = None
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        t = tag.lower()
+        if t in self._SKIP_TAGS or t.endswith(":hidden") or t.endswith(":header"):
+            self._skip_depth += 1
+            return
+        if self._skip_depth > 0:
+            return
+
+        if t == "table":
+            if self._in_table == 0:
+                self._cur_rows = []
+            self._in_table += 1
+        elif t == "tr" and self._in_table > 0:
+            self._cur_row = []
+        elif t in ("td", "th") and self._cur_row is not None:
+            self._cur_cell = []
+        elif self._cur_cell is not None:
+            if t == "br":
+                self._cur_cell.append(" ")
+        else:
+            if t in self._HEADING_TAGS:
+                self._out.append(f"\n\n{self._HEADING_TAGS[t]} ")
+            elif t == "li":
+                self._out.append("\n- ")
+            elif t in self._BLOCK_TAGS:
+                self._out.append("\n\n")
+            elif t == "br":
+                self._out.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if t in self._SKIP_TAGS or t.endswith(":hidden") or t.endswith(":header"):
+            self._skip_depth = max(0, self._skip_depth - 1)
+            return
+        if self._skip_depth > 0:
+            return
+
+        if t in ("td", "th") and self._cur_cell is not None and self._cur_row is not None:
+            cell_txt = re.sub(r"\s+", " ", "".join(self._cur_cell)).strip().replace("|", "\\|")
+            self._cur_row.append(cell_txt)
+            self._cur_cell = None
+        elif t == "tr" and self._cur_row is not None:
+            if any(c for c in self._cur_row):
+                self._cur_rows.append(self._cur_row)
+            self._cur_row = None
+        elif t == "table" and self._in_table > 0:
+            self._in_table -= 1
+            if self._in_table == 0 and self._cur_rows:
+                self._flush_table(self._cur_rows)
+                self._cur_rows = []
+        elif self._cur_cell is None and t in self._HEADING_TAGS:
+            self._out.append("\n\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth > 0 or not data:
+            return
+        cleaned = data.replace("\xa0", " ")
+        if self._cur_cell is not None:
+            self._cur_cell.append(cleaned)
+        elif self._in_table == 0:
+            self._out.append(cleaned)
+
+    def _flush_table(self, rows: List[List[str]]) -> None:
+        max_cols = max((len(r) for r in rows), default=0)
+        if max_cols == 0:
+            return
+        norm_rows = [r + [""] * (max_cols - len(r)) for r in rows]
+        lines = [
+            "| " + " | ".join(norm_rows[0]) + " |",
+            "| " + " | ".join("---" for _ in range(max_cols)) + " |",
+        ]
+        for r in norm_rows[1:]:
+            lines.append("| " + " | ".join(r) + " |")
+        self._out.append("\n\n" + "\n".join(lines) + "\n\n")
+
+    def get_markdown(self) -> str:
+        raw = "".join(self._out)
+        lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in raw.splitlines()]
+        joined = "\n".join(lines)
+        return re.sub(r"\n{3,}", "\n\n", joined).strip()
+
+
+def html_to_markdown(html_text: str) -> str:
+    """Convert SEC EDGAR HTML/iXBRL filing content into clean Markdown."""
+    parser = _SecHtmlToMarkdown()
+    parser.feed(html_text or "")
+    parser.close()
+    return parser.get_markdown()
+
+
+class _SecIndexTableParser(HTMLParser):
+    """Parse SEC `{accession}-index.htm` document table to extract `(doc_type, filename)` pairs."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._in_tr = False
+        self._in_td = False
+        self._row: List[str] = []
+        self._cell: List[str] = []
+        self.rows: List[List[str]] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        t = tag.lower()
+        if t == "tr":
+            self._in_tr = True
+            self._row = []
+        elif t in ("td", "th") and self._in_tr:
+            self._in_td = True
+            self._cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if t in ("td", "th") and self._in_td:
+            self._row.append(re.sub(r"\s+", " ", "".join(self._cell)).strip())
+            self._in_td = False
+        elif t == "tr" and self._in_tr:
+            if self._row:
+                self.rows.append(self._row)
+            self._in_tr = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_td and data:
+            self._cell.append(data)
+
+
+def _parse_sec_index_documents(index_html: str) -> List[Tuple[str, str]]:
+    """Extract `(doc_type, filename)` tuples for HTML/text documents from an SEC filing index page."""
+    p = _SecIndexTableParser()
+    p.feed(index_html or "")
+    p.close()
+    docs: List[Tuple[str, str]] = []
+    for row in p.rows:
+        # Standard SEC index table columns: [Seq, Description, Document, Type, Size]
+        if len(row) < 4:
+            continue
+        doc_cell = row[2].split()[0].strip() if row[2] else ""
+        doc_type = row[3].strip().upper()
+        if not doc_cell or not doc_type or doc_type == "TYPE":
+            continue
+        if doc_cell.lower().endswith((".htm", ".html", ".txt")):
+            docs.append((doc_type, doc_cell))
+    return docs
+
+
 @dataclass
 class SecDownloadResult:
     ticker: str
@@ -283,6 +508,201 @@ class SecDownloadResult:
     form_errors: Dict[str, str] = field(default_factory=dict)
     converted_files: List[Path] = field(default_factory=list)
     skipped_unparseable: int = 0
+    resolved_cik: str = ""
+    source_used: str = "datamule"
+
+
+def _write_sec_markdown_file(
+    *,
+    md_dir: Path,
+    clean_ticker: str,
+    sub_type: str,
+    doc_type: str,
+    period: str,
+    filing_date: str,
+    accession: str,
+    md_content: str,
+    allowed_covers: Set[str],
+    used_names: Set[str],
+) -> Path:
+    cleaned = cleanup_markdown_tables(md_content)
+    meta_comment = [
+        "<!-- financial-advisor-meta",
+        f"ticker: {clean_ticker}",
+        f"form_type: {sub_type}",
+        f"doc_type: {doc_type}",
+        f"filing_date: {_format_yyyymmdd(filing_date)}",
+        f"period: {_format_yyyymmdd(period) if period else ''}",
+        f"accession_number: {accession}",
+        "-->",
+        "",
+    ]
+    full_md = "\n".join(meta_comment) + cleaned
+    raw_fname = make_sec_filename(
+        clean_ticker,
+        sub_type,
+        doc_type,
+        period,
+        filing_date,
+        allowed_cover_forms=allowed_covers,
+    )
+    fname = deduplicate_filename(raw_fname, used_names)
+    out_path = md_dir / fname
+    out_path.write_text(full_md, encoding="utf-8")
+    return out_path
+
+
+def _download_via_sec_edgar_api(
+    *,
+    clean_ticker: str,
+    cik: str,
+    forms: Sequence[str],
+    start_date_str: str,
+    end_date_str: str,
+    md_dir: Path,
+    allowed_covers: Set[str],
+    result: SecDownloadResult,
+    on_status: Optional[Callable[[str], None]] = None,
+    session: Optional[requests.Session] = None,
+) -> None:
+    """Direct official SEC EDGAR REST API fallback (`data.sec.gov/submissions/CIK...json`)."""
+    http = session or requests.Session()
+    headers = _sec_headers()
+    cik_int = int(cik)
+    form_set = {f.upper() for f in forms}
+
+    def _emit(msg: str) -> None:
+        if on_status:
+            on_status(msg)
+
+    sub_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+    try:
+        resp = http.get(sub_url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        result.form_errors["SEC EDGAR API"] = f"Could not query {sub_url}: {exc}"
+        return
+
+    blocks: List[Dict[str, Any]] = []
+    filings = data.get("filings") if isinstance(data, dict) else None
+    if isinstance(filings, dict):
+        recent = filings.get("recent")
+        if isinstance(recent, dict):
+            blocks.append(recent)
+        # Fetch older paginated archive JSONs only if the window extends before recent's earliest filing
+        recent_dates = recent.get("filingDate") if isinstance(recent, dict) else None
+        oldest_recent = min((d for d in (recent_dates or []) if d), default="")
+        if oldest_recent and start_date_str < oldest_recent:
+            for extra in filings.get("files") or []:
+                if not isinstance(extra, dict) or not extra.get("name"):
+                    continue
+                if extra.get("filingTo") and str(extra["filingTo"]) < start_date_str:
+                    continue
+                try:
+                    time.sleep(0.12)
+                    er = http.get(f"https://data.sec.gov/submissions/{extra['name']}", headers=headers, timeout=30)
+                    if er.status_code == 200 and isinstance(er.json(), dict):
+                        blocks.append(er.json())
+                except Exception:
+                    continue
+
+    matched_subs: List[Tuple[str, str, str, str, str]] = []
+    seen_acc: Set[str] = set()
+    for blk in blocks:
+        f_forms = blk.get("form") or []
+        f_dates = blk.get("filingDate") or []
+        f_periods = blk.get("reportDate") or []
+        f_accs = blk.get("accessionNumber") or []
+        f_prim = blk.get("primaryDocument") or []
+        n = min(len(f_forms), len(f_dates), len(f_accs))
+        for i in range(n):
+            f_type = str(f_forms[i] or "").strip().upper()
+            f_dt = str(f_dates[i] or "").strip()
+            acc = str(f_accs[i] or "").strip()
+            if f_type not in form_set or not acc or acc in seen_acc:
+                continue
+            if not (start_date_str <= f_dt <= end_date_str):
+                continue
+            seen_acc.add(acc)
+            per = str(f_periods[i] or "").strip() if i < len(f_periods) else ""
+            prim = str(f_prim[i] or "").strip() if i < len(f_prim) else ""
+            matched_subs.append((f_type, f_dt, per, acc, prim))
+
+    # Deduplicate IPO amendments (keep latest per base IPO form)
+    latest_ipo: Dict[str, Tuple[str, Tuple[str, str, str, str, str]]] = {}
+    selected_subs: List[Tuple[str, str, str, str, str]] = []
+    for sub in matched_subs:
+        base = submission_base(sub[0])
+        if base in IPO_BASES:
+            if base not in latest_ipo or sub[1] > latest_ipo[base][0]:
+                latest_ipo[base] = (sub[1], sub)
+        else:
+            selected_subs.append(sub)
+    for _, sub in latest_ipo.values():
+        selected_subs.append(sub)
+    selected_subs.sort(key=lambda x: x[1])
+
+    if not selected_subs:
+        return
+
+    result.source_used = "sec_edgar_api"
+    used_names: Set[str] = set()
+    _emit(
+        f"SEC EDGAR API found {len(selected_subs)} filing(s) for {clean_ticker} (CIK {cik}) — downloading & converting..."
+    )
+
+    for sub_type, filing_date, period, accession, primary_doc in selected_subs:
+        result.submissions_found += 1
+        acc_no_dash = accession.replace("-", "")
+        base_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_no_dash}"
+
+        # Inspect `{accession}-index.htm` to discover both primary filing & useful EX-99.* exhibits
+        doc_targets: List[Tuple[str, str]] = []
+        try:
+            time.sleep(0.12)
+            idx_resp = http.get(f"{base_url}/{accession}-index.htm", headers=headers, timeout=25)
+            if idx_resp.status_code == 200:
+                for dt_code, fname in _parse_sec_index_documents(idx_resp.text):
+                    if is_useful_document(dt_code, allowed_cover_forms=allowed_covers):
+                        doc_targets.append((dt_code, fname))
+        except Exception:
+            pass
+
+        if not doc_targets and primary_doc:
+            doc_targets.append((sub_type, primary_doc))
+
+        for doc_type, doc_filename in doc_targets:
+            try:
+                time.sleep(0.12)
+                doc_resp = http.get(f"{base_url}/{doc_filename}", headers=headers, timeout=45)
+                if doc_resp.status_code != 200 or not doc_resp.text:
+                    result.skipped_unparseable += 1
+                    continue
+                md_text = (
+                    doc_resp.text.strip()
+                    if doc_filename.lower().endswith(".txt")
+                    else html_to_markdown(doc_resp.text)
+                )
+                if not md_text:
+                    result.skipped_unparseable += 1
+                    continue
+                out_path = _write_sec_markdown_file(
+                    md_dir=md_dir,
+                    clean_ticker=clean_ticker,
+                    sub_type=sub_type,
+                    doc_type=doc_type,
+                    period=period,
+                    filing_date=filing_date,
+                    accession=accession,
+                    md_content=md_text,
+                    allowed_covers=allowed_covers,
+                    used_names=used_names,
+                )
+                result.converted_files.append(out_path)
+            except Exception:
+                result.skipped_unparseable += 1
+                continue
 
 
 def download_and_convert_sec_filings(
@@ -291,8 +711,12 @@ def download_and_convert_sec_filings(
     num_years: int = 2,
     data_root: Path = DEFAULT_DATA_ROOT,
     on_status: Optional[Callable[[str], None]] = None,
+    session: Optional[requests.Session] = None,
 ) -> SecDownloadResult:
-    """Download SEC filings via `datamule`, filter junk, clean tables, and save Markdown."""
+    """Download SEC filings via `datamule` (with automatic official SEC EDGAR REST API fallback),
+    filter junk, clean tables, and save Markdown."""
+    # Ensure a compliant User-Agent is set BEFORE importing datamule (datamule reads env at import time)
+    os.environ.setdefault("DATAMULE_SEC_USER_AGENT", DEFAULT_SEC_USER_AGENT)
     try:
         from datamule import Portfolio
     except ImportError as exc:
@@ -327,14 +751,21 @@ def download_and_convert_sec_filings(
         if on_status:
             on_status(msg)
 
+    # Resolve authoritative SEC CIK directly from SEC EDGAR (avoids stale datamule ticker CSVs)
+    resolved_cik = resolve_ticker_to_cik(clean_ticker, session=session)
+    if resolved_cik:
+        result.resolved_cik = resolved_cik
+        _emit(f"Resolved {clean_ticker} → SEC CIK {resolved_cik}")
+
     # ── Step 1: Download per form type with filing_date filter ─────────
+    id_kwargs = {"cik": resolved_cik} if resolved_cik else {"ticker": clean_ticker}
     for idx, form in enumerate(forms, start=1):
         _emit(f"[{idx}/{len(forms)}] Downloading {clean_ticker} {form} ({start_date_str} → {end_date_str})...")
         try:
             portfolio = Portfolio(str(raw_dir))
             try:
                 portfolio.download_submissions(
-                    ticker=clean_ticker,
+                    **id_kwargs,
                     submission_type=[form],
                     filing_date=(start_date_str, end_date_str),
                     provider="sec",
@@ -343,7 +774,7 @@ def download_and_convert_sec_filings(
             except TypeError:
                 # Fallback for older datamule versions without skip_existing
                 portfolio.download_submissions(
-                    ticker=clean_ticker,
+                    **id_kwargs,
                     submission_type=[form],
                     filing_date=(start_date_str, end_date_str),
                     provider="sec",
@@ -413,31 +844,36 @@ def download_and_convert_sec_filings(
             result.skipped_unparseable += 1
             continue
 
-        md_content = cleanup_markdown_tables(md_content)
-        meta_comment = [
-            "<!-- financial-advisor-meta",
-            f"ticker: {clean_ticker}",
-            f"form_type: {sub_type}",
-            f"doc_type: {doc_type}",
-            f"filing_date: {_format_yyyymmdd(filing_date)}",
-            f"period: {_format_yyyymmdd(period) if period else ''}",
-            f"accession_number: {accession}",
-            "-->",
-            "",
-        ]
-        full_md = "\n".join(meta_comment) + md_content
-
-        raw_fname = make_sec_filename(
-            clean_ticker,
-            sub_type,
-            doc_type,
-            period,
-            filing_date,
-            allowed_cover_forms=allowed_covers,
+        out_path = _write_sec_markdown_file(
+            md_dir=md_dir,
+            clean_ticker=clean_ticker,
+            sub_type=sub_type,
+            doc_type=doc_type,
+            period=period,
+            filing_date=filing_date,
+            accession=accession,
+            md_content=md_content,
+            allowed_covers=allowed_covers,
+            used_names=used_names,
         )
-        fname = deduplicate_filename(raw_fname, used_names)
-        out_path = md_dir / fname
-        out_path.write_text(full_md, encoding="utf-8")
         result.converted_files.append(out_path)
+
+    # ── Step 4: Official SEC EDGAR REST API fallback if datamule silently returned 0 ──
+    if result.submissions_found == 0 and resolved_cik:
+        _emit(
+            f"datamule returned 0 submissions — falling back to official SEC EDGAR API for {clean_ticker} (CIK {resolved_cik})..."
+        )
+        _download_via_sec_edgar_api(
+            clean_ticker=clean_ticker,
+            cik=resolved_cik,
+            forms=forms,
+            start_date_str=start_date_str,
+            end_date_str=end_date_str,
+            md_dir=md_dir,
+            allowed_covers=allowed_covers,
+            result=result,
+            on_status=on_status,
+            session=session,
+        )
 
     return result
