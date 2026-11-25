@@ -1662,6 +1662,66 @@ def test_sec_edgar_api_fallback_when_datamule_returns_zero_submissions(tmp_path:
     assert resolve_ticker_to_cik("QFIN", session=mock_sess) == "0001741530"
 
 
+def test_datamule_document_without_markdown_attr_converts_via_content(tmp_path: Path, monkeypatch):
+    """Regression: older datamule Document objects have `.content` (HTML/bytes) but no `.markdown` property."""
+    import sys
+    import types
+
+    _TICKER_CIK_CACHE["QFIN"] = "0001741530"
+    today_yr = date.today().year
+
+    class _FakeDoc:
+        def __init__(self, doc_type, content):
+            self.type = doc_type
+            self.content = content
+
+    class _FakeSub:
+        def __init__(self):
+            self.accession = "0001104659-26-049501"
+            self.metadata = types.SimpleNamespace(content={
+                "type": "20-F",
+                "period": f"{today_yr - 1}1231",
+                "filing-date": f"{today_yr}0428",
+                "accession-number": "0001104659-26-049501",
+            })
+            self._docs = [
+                _FakeDoc("20-F", b"<h1>Qfin 20-F</h1><table><tr><th>Item</th><th>2025</th></tr><tr><td>Rev</td><td>3,088</td></tr></table>"),
+            ]
+
+        def __iter__(self):
+            return iter(self._docs)
+
+    class _FakePortfolio:
+        def __init__(self, path):
+            self.path = path
+
+        def download_submissions(self, **kwargs):
+            pass
+
+        def __iter__(self):
+            return iter([_FakeSub()])
+
+    fake_dm = types.ModuleType("datamule")
+    fake_dm.Portfolio = _FakePortfolio
+    monkeypatch.setitem(sys.modules, "datamule", fake_dm)
+
+    res = download_and_convert_sec_filings(
+        ticker="QFIN",
+        form_codes=["20-F"],
+        num_years=1,
+        data_root=tmp_path,
+    )
+    assert res.source_used == "datamule"
+    assert res.submissions_found == 1
+    assert res.skipped_unparseable == 0
+    assert res.form_errors == {}
+    assert len(res.converted_files) == 1
+    body = res.converted_files[0].read_text(encoding="utf-8")
+    assert "# Qfin 20-F" in body
+    assert "| Rev | 3,088 |" in body
+
+
+
 
 
 

@@ -848,11 +848,44 @@ def download_and_convert_sec_filings(
     filtered.sort(key=lambda c: c[1])
 
     # ── Step 3: Convert to cleaned Markdown with unique filenames ──────
+    def _extract_datamule_doc_markdown(doc_obj: Any) -> str:
+        # 1. Newer datamule exposes `.markdown` directly
+        if hasattr(doc_obj, "markdown"):
+            try:
+                md_val = doc_obj.markdown
+                if isinstance(md_val, bytes):
+                    md_val = md_val.decode("utf-8", errors="replace")
+                if isinstance(md_val, str) and md_val.strip():
+                    return md_val
+            except Exception:
+                pass
+        # 2. All datamule versions expose raw `.content` (HTML/bytes) -> convert cleanly via html_to_markdown
+        raw_content = getattr(doc_obj, "content", None)
+        if raw_content is not None:
+            if isinstance(raw_content, bytes):
+                raw_text = raw_content.decode("utf-8", errors="replace")
+            else:
+                raw_text = str(raw_content)
+            if raw_text.strip():
+                if "<" in raw_text and ">" in raw_text:
+                    converted = html_to_markdown(raw_text)
+                    if converted:
+                        return converted
+                return raw_text.strip()
+        # 3. Last resort: `.text` property
+        if hasattr(doc_obj, "text"):
+            txt_val = doc_obj.text
+            if isinstance(txt_val, bytes):
+                txt_val = txt_val.decode("utf-8", errors="replace")
+            if isinstance(txt_val, str) and txt_val.strip():
+                return txt_val.strip()
+        return ""
+
     used_names: Set[str] = set()
     first_conv_err = ""
     for sub_type, filing_date, doc_type, period, accession, doc in filtered:
         try:
-            md_content = doc.markdown
+            md_content = _extract_datamule_doc_markdown(doc)
         except Exception as exc:
             if not first_conv_err:
                 first_conv_err = f"{type(exc).__name__}: {exc}"
@@ -889,6 +922,7 @@ def download_and_convert_sec_filings(
             f"datamule produced 0 Markdown files — falling back to official SEC EDGAR API for {clean_ticker} (CIK {resolved_cik})..."
         )
         result.submissions_found = 0
+        result.skipped_unparseable = 0
         _download_via_sec_edgar_api(
             clean_ticker=clean_ticker,
             cik=resolved_cik,
