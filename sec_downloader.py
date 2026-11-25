@@ -644,6 +644,12 @@ def _download_via_sec_edgar_api(
     selected_subs.sort(key=lambda x: x[1])
 
     if not selected_subs:
+        all_dts = [str(d) for b in blocks for d in (b.get("filingDate") or []) if d]
+        latest_dt = max(all_dts) if all_dts else "none"
+        _emit(
+            f"SEC EDGAR API: 0 filings matched {sorted(form_set)} in {start_date_str} → {end_date_str} "
+            f"(checked {len(all_dts)} filings for CIK {cik}; latest filing date: {latest_dt})."
+        )
         return
 
     result.source_used = "sec_edgar_api"
@@ -652,6 +658,7 @@ def _download_via_sec_edgar_api(
         f"SEC EDGAR API found {len(selected_subs)} filing(s) for {clean_ticker} (CIK {cik}) — downloading & converting..."
     )
 
+    first_http_err = ""
     for sub_type, filing_date, period, accession, primary_doc in selected_subs:
         result.submissions_found += 1
         acc_no_dash = accession.replace("-", "")
@@ -670,13 +677,15 @@ def _download_via_sec_edgar_api(
             pass
 
         if not doc_targets and primary_doc:
-            doc_targets.append((sub_type, primary_doc))
+            doc_targets.append((sub_type, primary_doc.lstrip("/")))
 
         for doc_type, doc_filename in doc_targets:
             try:
                 time.sleep(0.12)
                 doc_resp = http.get(f"{base_url}/{doc_filename}", headers=headers, timeout=45)
                 if doc_resp.status_code != 200 or not doc_resp.text:
+                    if not first_http_err:
+                        first_http_err = f"HTTP {doc_resp.status_code} fetching {doc_filename}"
                     result.skipped_unparseable += 1
                     continue
                 md_text = (
@@ -700,9 +709,13 @@ def _download_via_sec_edgar_api(
                     used_names=used_names,
                 )
                 result.converted_files.append(out_path)
-            except Exception:
+            except Exception as exc:
+                if not first_http_err:
+                    first_http_err = f"{type(exc).__name__}: {exc}"
                 result.skipped_unparseable += 1
                 continue
+    if first_http_err and not result.converted_files:
+        result.form_errors["SEC EDGAR document fetch"] = first_http_err
 
 
 def download_and_convert_sec_filings(
@@ -788,8 +801,10 @@ def download_and_convert_sec_filings(
     portfolio = Portfolio(str(raw_dir))
     allowed_covers = BASE_COVER_FORMS | set(forms)
 
+    raw_total = 0
     candidates = []
     for submission in portfolio:
+        raw_total += 1
         meta = submission.metadata.content
         sub_type = (meta.get("type") or "").upper()
         period = meta.get("period", "") or ""
@@ -834,10 +849,13 @@ def download_and_convert_sec_filings(
 
     # ── Step 3: Convert to cleaned Markdown with unique filenames ──────
     used_names: Set[str] = set()
+    first_conv_err = ""
     for sub_type, filing_date, doc_type, period, accession, doc in filtered:
         try:
             md_content = doc.markdown
-        except Exception:
+        except Exception as exc:
+            if not first_conv_err:
+                first_conv_err = f"{type(exc).__name__}: {exc}"
             result.skipped_unparseable += 1
             continue
         if not md_content:
@@ -858,11 +876,19 @@ def download_and_convert_sec_filings(
         )
         result.converted_files.append(out_path)
 
-    # ── Step 4: Official SEC EDGAR REST API fallback if datamule silently returned 0 ──
-    if result.submissions_found == 0 and resolved_cik:
+    _emit(
+        f"datamule pass: {raw_total} raw submission(s) on disk, {result.submissions_found} in window, "
+        f"{len(result.converted_files)} converted, {result.skipped_unparseable} skipped."
+    )
+    if first_conv_err:
+        result.form_errors["datamule markdown conversion"] = first_conv_err
+
+    # ── Step 4: Official SEC EDGAR REST API fallback whenever datamule produced 0 Markdown files ──
+    if not result.converted_files and resolved_cik:
         _emit(
-            f"datamule returned 0 submissions — falling back to official SEC EDGAR API for {clean_ticker} (CIK {resolved_cik})..."
+            f"datamule produced 0 Markdown files — falling back to official SEC EDGAR API for {clean_ticker} (CIK {resolved_cik})..."
         )
+        result.submissions_found = 0
         _download_via_sec_edgar_api(
             clean_ticker=clean_ticker,
             cik=resolved_cik,

@@ -283,8 +283,8 @@ with tab_sec:
                         cik_note = f" (CIK `{res.resolved_cik}`)" if getattr(res, "resolved_cik", "") else " (CIK unresolved)"
                         st.warning(
                             f"Queried {res.forms_succeeded}/{res.forms_requested} form types{cik_note}, "
-                            f"but 0 convertible filings were found for `{clean_t}` in the last "
-                            f"{int(sec_years)} year(s)."
+                            f"found {res.submissions_found} submission(s) ({res.skipped_unparseable} skipped), "
+                            f"0 convertible filings for `{clean_t}` in the last {int(sec_years)} year(s)."
                         )
                     if res.form_errors:
                         with st.expander(f"⚠️ Warnings / Skipped Forms ({len(res.form_errors)})"):
